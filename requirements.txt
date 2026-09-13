@@ -1,0 +1,8 @@
+google-genai>=0.3.0
+rembg[cpu]>=2.0.57
+pillow>=10.0.0
+pillow-avif-plugin>=1.4.3
+python-dotenv>=1.0.0
+streamlit>=1.38.0
+colorthief>=0.2.1
+numpy>=1.26.0
