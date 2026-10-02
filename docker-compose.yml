@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    container_name: creapoleras-app
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      # Persistencia de los modelos de rembg (u2net) para evitar re-descargas
+      - u2net-models:/root/.u2net
+
+volumes:
+  u2net-models:

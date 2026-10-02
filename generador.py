@@ -15,6 +15,7 @@ siguen siendo los mismos.
 """
 
 import os
+import sys
 import io
 import json
 import re
@@ -61,16 +62,20 @@ ANCHO_FINAL_PX = 1620
 ALTO_FINAL_PX = 2160
 RELACION_ASPECTO = "3:4"
 
+DIMENSIONES_POR_PROPORCION = {
+    "3:4": (1620, 2160),
+    "1:1": (2048, 2048),
+    "9:16": (1215, 2160),
+    "4:3": (2160, 1620),
+}
+
 # Color chroma exacto usado como fondo cuando no se pide uno sólido específico.
 # Se elige lejos de pieles/telas/paletas de diseño típicas para que el chroma
 # key (quitar_fondo_por_chroma) lo pueda separar de forma limpia y consistente.
 COLOR_CHROMA_DEFECTO = "#00FF7F"
 
-# Alpha matting (el recorte fino que usamos para bordes más limpios) puede
-# consumir muchísima memoria en fotos de celular modernas (12-48 megapíxeles).
-# Como el resultado final igual se reescala a ANCHO_FINAL_PX x ALTO_FINAL_PX,
-# no perdemos nada útil bajando la imagen ANTES de ese paso.
-LADO_MAXIMO_PARA_RECORTE = 1600
+# Reducción de imágenes antes de recortar o procesar para evitar desbordes de memoria RAM.
+LADO_MAXIMO_PARA_RECORTE = 1024
 
 
 def _redimensionar_si_es_muy_grande(imagen: Image.Image, lado_maximo: int = LADO_MAXIMO_PARA_RECORTE) -> Image.Image:
@@ -101,8 +106,9 @@ def extraer_perfil_color(imagenes_referencia: list[Image.Image], cantidad_colore
     """
     todos_los_colores = []
     for imagen in imagenes_referencia:
+        img_optimizada = _redimensionar_si_es_muy_grande(imagen, 800)
         buffer_entrada = io.BytesIO()
-        imagen.convert("RGB").save(buffer_entrada, format="PNG")
+        img_optimizada.convert("RGB").save(buffer_entrada, format="PNG")
         buffer_entrada.seek(0)
         color_thief = ColorThief(buffer_entrada)
         paleta = color_thief.get_palette(color_count=cantidad_colores, quality=1)
@@ -215,6 +221,10 @@ def analizar_referencias(
       }},
       "estilo_subtitulos_y_rotulos": "<estilo tipográfico de textos secundarios o etiquetas pequeñas bajo cada elemento: ej 'Sans-serif bold pequeña en mayúsculas centrada', 'Tipografía tipo máquina de escribir o rótulo enciclopédico vintage'>",
       "medio_y_tecnica": "<técnica artística abstracta aplicada a {sujeto_nombre}: ej 'Ilustración estilo grabado enciclopédico/científico vintage a tinta con achurado lineal fino y coloreado tenue', 'Fotocollage estilo bootleg rap tee de los 90s con semitono de serigrafía', 'Ilustración vectorial plana estilo anime con líneas limpias'>",
+      "trazo_y_linea": "<grosor y tipo de contorno: ej 'Línea de tinta negra gruesa e imperfecta estilo serigrafía analógica', 'Trazo fino y nítido de pluma técnica estilo grabado', 'Sin contornos exteriores, figuras delimitadas por color plano'>",
+      "metodo_sombreado": "<técnica exacta de sombreado: ej 'Trama de puntos de semitono / halftone serigráfico', 'Achurado lineal cruzado fino (cross-hatching) a tinta', 'Sombras planas de dos tonos cel-shading', 'Degradado suave continuo'>",
+      "tratamiento_tintas": "<aplicación del color: ej 'Tintas planas y opacas limitadas a 3-4 colores estilo serigrafía textil', 'Semitono CMYK superpuesto con ganancia de punto vintage', 'Aguadas tenues translúcidas'>",
+      "textura_y_sustrato": "<acabado superficial y desgaste: ej 'Grano de papel envejecido y manchas sutiles', 'Efecto de tela lavada ácida desgastada (vintage wash)', 'Acabado liso y nítido'>",
       "composicion_general": "<jerarquía visual: ej 'Composición de lámina o catálogo con título superior, subtítulo en bloque, cuadrícula equilibrada de ilustraciones de {sujeto_nombre} con pequeños rótulos descriptivos bajo cada una'>",
       "tono_y_saturacion": "<clima cromático y contraste: ej 'Fondo neutro/crema con tonos naturales apagados y contraste medio', 'Contraste alto con tonos oscuros y brillos metálicos'>",
       "estilo_grafico_detalles": "<elementos ornamentales o texturas: ej 'Marco perimetral delgado, textura de papel envejecido sutil, achurado lineal clásico, destellos'>{instruccion_colores}
@@ -232,6 +242,10 @@ def analizar_referencias(
         },
         "estilo_subtitulos_y_rotulos": "Sans-serif bold pequeña",
         "medio_y_tecnica": "Ilustración gráfica profesional para serigrafía",
+        "trazo_y_linea": "Trazo definido con línea nítida de serigrafía",
+        "metodo_sombreado": "Sombreado gráfico de alto contraste",
+        "tratamiento_tintas": "Tintas planas bien contrastadas",
+        "textura_y_sustrato": "Textura gráfica limpia para estampado",
         "composicion_general": "Composición centrada equilibrada",
         "tono_y_saturacion": "Contraste equilibrado y tonos naturales",
         "estilo_grafico_detalles": "Acabado de serigrafía profesional",
@@ -259,6 +273,10 @@ def analizar_referencias(
             data = fallback_ref
 
     data["medio_y_tecnica"] = _sanitizar_texto_de_referencia(data.get("medio_y_tecnica", ""), sujeto_nombre)
+    data["trazo_y_linea"] = _sanitizar_texto_de_referencia(data.get("trazo_y_linea", ""), sujeto_nombre)
+    data["metodo_sombreado"] = _sanitizar_texto_de_referencia(data.get("metodo_sombreado", ""), sujeto_nombre)
+    data["tratamiento_tintas"] = _sanitizar_texto_de_referencia(data.get("tratamiento_tintas", ""), sujeto_nombre)
+    data["textura_y_sustrato"] = _sanitizar_texto_de_referencia(data.get("textura_y_sustrato", ""), sujeto_nombre)
     data["composicion_general"] = _sanitizar_texto_de_referencia(data.get("composicion_general", ""), sujeto_nombre)
     data["estilo_grafico_detalles"] = _sanitizar_texto_de_referencia(data.get("estilo_grafico_detalles", ""), sujeto_nombre)
     data["estilo_subtitulos_y_rotulos"] = _sanitizar_texto_de_referencia(data.get("estilo_subtitulos_y_rotulos", ""), sujeto_nombre)
@@ -388,10 +406,24 @@ def generar_diseno_desde_imagenes(
     color_fondo_solido: str | None = None,
     descripcion_sujeto: str = "",
     tipo_sujeto: str = "Auto-detectar",
+    pose_personalizada: str = "",
+    encuadre: str = "Auto",
+    expresion: str = "Auto",
+    distribucion_figuras: str = "Auto",
+    tecnica_artistica: str = "Auto",
+    acabado_textil: str = "Auto",
+    bordes: str = "Auto",
+    iluminacion: str = "Auto",
+    acentos_graficos: list[str] | None = None,
+    instrucciones_extra: str = "",
+    elementos_a_evitar: str = "",
+    proporcion_estampado: str = "3:4",
+    nivel_estilizacion: str = "Transformación artística total (Recomendado: máxima fidelidad de estilo)",
 ) -> Image.Image:
     """
     Genera el diseño completo combinando la plantilla abstracta de la referencia
-    con el sujeto real que el usuario subió (personas, plantas, animales, autos, etc.).
+    con el sujeto real que el usuario subió (personas, plantas, animales, autos, etc.)
+    y las preferencias explícitas opcionales de diseño y pose.
     """
     print("1/5 Analizando sujeto(s) a ilustrar...")
     analisis_sujeto = analizar_sujeto(imagenes_personaje, titulo, descripcion_sujeto, frases_sueltas)
@@ -405,6 +437,18 @@ def generar_diseno_desde_imagenes(
     perfil_color = extraer_perfil_color(imagenes_referencia)
 
     cant_elementos = max(1, int(analisis_ref.get("cantidad_elementos_en_layout", len(analisis_ref.get("distribucion_elementos", [])) or 1)))
+    
+    # Sobrescritura de cantidad de elementos si el usuario especificó una distribución manual
+    if distribucion_figuras and not distribucion_figuras.startswith("Auto"):
+        if "1 sola figura" in distribucion_figuras:
+            cant_elementos = 1
+        elif "2-3 figuras" in distribucion_figuras:
+            cant_elementos = 3
+        elif "Collage múltiple" in distribucion_figuras:
+            cant_elementos = 5
+        elif "Cuadrícula / Catálogo" in distribucion_figuras:
+            cant_elementos = max(cant_elementos, 6)
+
     medio_tec = analisis_ref.get("medio_y_tecnica", "Gráfica de polera")
     layout_tipo = analisis_ref.get("tipo_layout", "layout")
 
@@ -420,19 +464,19 @@ def generar_diseno_desde_imagenes(
         from rembg import remove
         imagenes_personaje_final = []
         for img in imagenes_personaje:
-            img_reducida = _redimensionar_si_es_muy_grande(img)
+            img_reducida = _redimensionar_si_es_muy_grande(img, 1024)
             buffer_entrada = io.BytesIO()
             img_reducida.save(buffer_entrada, format="PNG")
-            resultado = remove(
-                buffer_entrada.getvalue(),
-                alpha_matting=True,
-                alpha_matting_foreground_threshold=240,
-                alpha_matting_background_threshold=10,
-                alpha_matting_erode_size=5,
-            )
-            imagenes_personaje_final.append(Image.open(io.BytesIO(resultado)))
+            try:
+                # Se utiliza rembg directamente sin alpha_matting (alpha_matting intenta alocar
+                # matrices scipy/numpy gigantescas de más de 2 GiB causando MemoryError en Windows)
+                resultado = remove(buffer_entrada.getvalue())
+                imagenes_personaje_final.append(Image.open(io.BytesIO(resultado)))
+            except Exception as err_rem:
+                print(f"   Aviso: fallo al recortar fondo del sujeto ({err_rem}), usando imagen directa...")
+                imagenes_personaje_final.append(img_reducida)
     else:
-        imagenes_personaje_final = imagenes_personaje
+        imagenes_personaje_final = [_redimensionar_si_es_muy_grande(img, 1024) for img in imagenes_personaje]
 
     print("3/5 Armando prompt final estructurado...")
     
@@ -487,15 +531,86 @@ def generar_diseno_desde_imagenes(
             "Ningún elemento de las ilustraciones ni del texto debe usar este mismo verde)."
         )
 
+    # Construcción de directrices opcionales del usuario
+    directrices_usuario = []
+    if pose_personalizada and pose_personalizada.strip():
+        directrices_usuario.append(f"- POSE Y ACCIÓN OBLIGATORIA DEL SUJETO: {pose_personalizada.strip()}")
+    if encuadre and not encuadre.startswith("Auto"):
+        directrices_usuario.append(f"- ENCUADRE / TIPO DE PLANO: {encuadre}")
+    if expresion and not expresion.startswith("Auto"):
+        directrices_usuario.append(f"- EXPRESIÓN Y ACTITUD DEL SUJETO: {expresion}")
+    if distribucion_figuras and not distribucion_figuras.startswith("Auto"):
+        directrices_usuario.append(f"- COMPOSICIÓN Y DISTRIBUCIÓN: {distribucion_figuras}")
+    if tecnica_artistica and not tecnica_artistica.startswith("Auto"):
+        directrices_usuario.append(f"- TÉCNICA ARTÍSTICA OBLIGATORIA: {tecnica_artistica}")
+    if acabado_textil and not acabado_textil.startswith("Auto"):
+        directrices_usuario.append(f"- ACABADO / TEXTURA DE ESTAMPADO SERIGRÁFICO: {acabado_textil}")
+    if bordes and not bordes.startswith("Auto"):
+        directrices_usuario.append(f"- INTEGRACIÓN DE BORDES: {bordes}")
+    if iluminacion and not iluminacion.startswith("Auto"):
+        directrices_usuario.append(f"- ILUMINACIÓN Y ATMÓSFERA: {iluminacion}")
+    if acentos_graficos:
+        directrices_usuario.append(f"- ACENTOS Y ELEMENTOS GRÁFICOS A INCLUIR: {', '.join(acentos_graficos)}")
+    if instrucciones_extra and instrucciones_extra.strip():
+        directrices_usuario.append(f"- INSTRUCCIONES ESPECÍFICAS ADICIONALES: {instrucciones_extra.strip()}")
+
+    # Directiva de estilización y fidelidad de estilo
+    if "total" in nivel_estilizacion.lower():
+        directrices_usuario.append(
+            "- DIRECTIVA DE ESTILIZACIÓN (TRANSFORMACIÓN ARTÍSTICA TOTAL): Dibuja al sujeto completamente desde cero "
+            "utilizando la misma técnica manual, trazo, entintado y pigmento del ilustrador de la imagen de referencia. "
+            "PROHIBIDO incrustar o recortar una foto realista del sujeto sobre el diseño: el sujeto debe ser "
+            "reilustrado íntegramente en la técnica visual observada para que luzca 100% nativo al arte."
+        )
+    elif "fisonom" in nivel_estilizacion.lower():
+        directrices_usuario.append(
+            "- DIRECTIVA DE ESTILIZACIÓN (CONSERVAR FISONOMÍA): Mantén con alto realismo y fidelidad fotográfica "
+            "los rasgos faciales y proporciones originales del sujeto, integrando el estilo visual, "
+            "la paleta, la tipografía y la diagramación del diseño a su alrededor."
+        )
+    else:
+        directrices_usuario.append(
+            "- DIRECTIVA DE ESTILIZACIÓN (EQUILIBRADO): Logra una armonía perfecta entre la reconocibilidad "
+            "fotográfica del sujeto y la técnica artística de la referencia, adaptando texturas y luces."
+        )
+
+    bloque_directrices_usuario = ""
+    if directrices_usuario:
+        bloque_directrices_usuario = (
+            "\n0. PREFERENCIAS Y REQUERIMIENTOS PRIORITARIOS DEFINIDOS POR EL USUARIO:\n"
+            + "\n".join(directrices_usuario) + "\n"
+        )
+
+    bloque_negativos = ""
+    if elementos_a_evitar and elementos_a_evitar.strip():
+        bloque_negativos = (
+            f"\n* ELEMENTOS ESTRICTAMENTE PROHIBIDOS / NEGATIVOS (QUÉ EVITAR A TODA COSTA): {elementos_a_evitar.strip()}\n"
+        )
+
+    tecnica_dominante = (
+        tecnica_artistica 
+        if (tecnica_artistica and not tecnica_artistica.startswith("Auto")) 
+        else analisis_ref.get('medio_y_tecnica', 'Ilustración gráfica profesional')
+    )
+    efectos_graficos_texto = analisis_ref.get('estilo_grafico_detalles', 'Detalles de serigrafía clásica')
+    if acabado_textil and not acabado_textil.startswith("Auto"):
+        efectos_graficos_texto += f". Acabado textil: {acabado_textil}"
+    if bordes and not bordes.startswith("Auto"):
+        efectos_graficos_texto += f". Tratamiento de bordes: {bordes}"
+
+    atmosfera_texto = analisis_ref.get('tono_y_saturacion', 'Equilibrada')
+    if iluminacion and not iluminacion.startswith("Auto"):
+        atmosfera_texto += f". Iluminación: {iluminacion}"
+
     prompt_final = f"""
 [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO PARA POLERA / T-SHIRT ARTWORK]
-
+{bloque_directrices_usuario}
 1. SUJETO ÚNICO Y EXCLUSIVO DE TODA LA ILUSTRACIÓN:
 - Sujeto objetivo a ilustrar: {sujeto_nombre}
 - Características visuales clave de {sujeto_nombre}: {sujeto_desc}
 * REGLA ABSOLUTA DE CONTENIDO: Cada una de las ilustraciones en esta pieza debe representar EXCLUSIVAMENTE a {sujeto_nombre}, basándose fielmente en las fotos adjuntas.
 * PROHIBICIÓN ESTRICTA: PROHIBIDO dibujar cualquier elemento o tema ajeno a {sujeto_nombre}. PROHIBIDO dibujar fósiles, huesos, dinosaurios, personas o elementos de la imagen de referencia. La referencia es SOLO una plantilla de diagramación; el contenido visual entero es 100% {sujeto_nombre}.
-
+{bloque_negativos}
 2. DESGLOSE DE ELEMENTOS Y VARIACIONES A ILUSTRAR:
 Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composición, todos correspondientes a {sujeto_nombre}:
 {instrucciones_elementos_texto}
@@ -509,29 +624,57 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 - Textos secundarios / subtítulos: {frases_texto} (Estilo tipográfico: {estilo_subtitulos})
 * REGLA DE TEXTO: Dibuja ÚNICAMENTE los textos indicados por el usuario ("{titulo}" y frases secundarias especificadas). PROHIBIDO copiar o inventar frases ajenas (como textos de memes, fósiles o frases de la referencia). Ortografía exacta y tipografía nítida.
 
-4. TÉCNICA ARTÍSTICA Y COMPOSICIÓN:
-- Técnica / Medio visual dominante: {analisis_ref.get('medio_y_tecnica', 'Ilustración gráfica profesional')} aplicada a {sujeto_nombre}
+4. TÉCNICA ARTÍSTICA Y MICRO-ESTILO (IMITACIÓN FORENSE DE LA REFERENCIA):
+- Técnica visual dominante: {tecnica_dominante} aplicada a {sujeto_nombre}
+- Trazo y contorno: {analisis_ref.get('trazo_y_linea', 'Línea nítida y definida')}
+- Método de sombreado: {analisis_ref.get('metodo_sombreado', 'Sombreado gráfico contrastado')}
+- Tratamiento de color y tintas: {analisis_ref.get('tratamiento_tintas', 'Tintas serigráficas equilibradas')}
+- Textura y acabado de superficie: {efectos_graficos_texto}. {analisis_ref.get('textura_y_sustrato', '')}
 - Composición y layout: {analisis_ref.get('composicion_general', 'Composición equilibrada')}
-- Efectos y texturas gráficas: {analisis_ref.get('estilo_grafico_detalles', 'Detalles de serigrafía clásica')}
+* PROHIBICIÓN ESTRICTA DE LOOK DIGITAL GENÉRICO: PROHIBIDO generar acabados tipo render 3D glossy, sombreados CGI sintéticos, plásticos lisos, figuras de cera o vectores corporativos genéricos. La pieza debe emular fielmente la técnica artística tradicional/textil de la referencia.
 * REGLA DE COHERENCIA: Aplica esta MISMA técnica artística de forma uniforme e impecable a todas las ilustraciones de {sujeto_nombre} y a los textos.
 
 5. COLOR, TONO Y FONDO:
 - {instruccion_colores}
-- Tono e intensidad cromática: Saturación media {perfil_color['saturacion_promedio_pct']}% ({perfil_color['categoria_tono']}), atmósfera: {analisis_ref.get('tono_y_saturacion', 'Equilibrada')}.
+- Tono e intensidad cromática: Saturación media {perfil_color['saturacion_promedio_pct']}% ({perfil_color['categoria_tono']}), atmósfera: {atmosfera_texto}.
 - Fondo: {instruccion_fondo}
 - RESTRICCIÓN DE SALIDA: Genera EXCLUSIVAMENTE el archivo de arte gráfico 2D plano, de frente, ocupando el lienzo completo. PROHIBIDO generar mockups de poleras, personas vistiendo ropa, pliegues de tela o fondos de estudio.
 """
 
-    # Gemini solo soporta 1K/2K en modelos de imagen
-    print(f"4/5 Generando diseño (modelo: {modelo_imagen}, proporción {RELACION_ASPECTO})...")
+    # Resolver proporción y resolución final
+    ratio_str = "3:4"
+    for r in ["1:1", "9:16", "4:3", "3:4"]:
+        if proporcion_estampado.startswith(r):
+            ratio_str = r
+            break
+
+    ancho_px, alto_px = DIMENSIONES_POR_PROPORCION.get(ratio_str, (ANCHO_FINAL_PX, ALTO_FINAL_PX))
+
+    print(f"4/5 Generando diseño (modelo: {modelo_imagen}, proporción {ratio_str}, multimodal directo)...")
     
+    # Preparar imágenes de referencia optimizadas para acondicionamiento multimodal directo (máx 1024px)
+    imagenes_ref_optimizadas = [
+        _redimensionar_si_es_muy_grande(img, 1024) for img in imagenes_referencia
+    ]
+
+    contenidos_multimodales = [
+        "### [REFERENCIA(S) VISUAL(ES) DE ESTILO, TÉCNICA Y DIAGRAMACIÓN]:\n"
+        "Inspecciona con extrema atención la técnica de entintado, el grosor de línea, el sombreado y la textura gráfica de estas imágenes de polera de referencia. "
+        "Debes transferir y replicar exactamente este mismo estilo artístico sobre el sujeto objetivo:",
+        *imagenes_ref_optimizadas,
+        "\n### [IMAGEN(ES) DEL SUJETO / PERSONAJE OBJETIVO]:\n"
+        "Este es el sujeto objetivo que debes ilustrar adoptando por completo el estilo y técnica de las referencias anteriores:",
+        *imagenes_personaje_final,
+        f"\n### [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO]:\n{prompt_final}",
+    ]
+
     respuesta_imagen = client.models.generate_content(
         model=modelo_imagen,
-        contents=[prompt_final, *imagenes_personaje_final],
+        contents=contenidos_multimodales,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
             image_config=types.ImageConfig(
-                aspect_ratio=RELACION_ASPECTO,
+                aspect_ratio=ratio_str,
             ),
         ),
     )
@@ -553,8 +696,9 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
         imagen_resultado = quitar_fondo_por_chroma(imagen_base, COLOR_CHROMA_DEFECTO)
 
     imagen_resultado = imagen_resultado.resize(
-        (ANCHO_FINAL_PX, ALTO_FINAL_PX), Image.LANCZOS
+        (ancho_px, alto_px), Image.LANCZOS
     )
+    imagen_resultado.info["prompt_final"] = prompt_final
 
     return imagen_resultado
 
@@ -562,6 +706,13 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 if __name__ == "__main__":
     # ---- EDITA ESTOS VALORES PARA TU PRUEBA POR LÍNEA DE COMANDOS ----
     # (si prefieres la interfaz visual, corre "python -m streamlit run app_visual.py")
+    if not os.path.exists("referencia.jpg") or not os.path.exists("personaje.jpg"):
+        print("\n[INFO] No se encontraron los archivos 'referencia.jpg' y/o 'personaje.jpg' en la carpeta.")
+        print("       Si prefieres usar la interfaz visual (recomendado), ejecuta:")
+        print("       python -m streamlit run app_visual.py\n")
+        print("       O coloca 'referencia.jpg' y 'personaje.jpg' en esta carpeta para probar por consola.\n")
+        sys.exit(0)
+
     referencias = [Image.open("referencia.jpg")]  # agrega más rutas a la lista si quieres varias
     personajes = [Image.open("personaje.jpg")]     # ídem para varias fotos del personaje
 

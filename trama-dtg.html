@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trama DTG — generador de medios tonos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#111214;
+    --panel:#1b1e24;
+    --panel-2:#20232a;
+    --line:#31353e;
+    --text:#eeece6;
+    --dim:#9a9da6;
+    --paper:#e9e5d8;
+    --cyan:#00AEEF;
+    --magenta:#EC008C;
+    --yellow:#FFE000;
+    --key:#f4f2ea;
+    --radius:2px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--ink);
+    color:var(--text);
+    font-family:'Space Grotesk',sans-serif;
+    min-height:100vh;
+  }
+  .app{
+    max-width:1180px;
+    margin:0 auto;
+    padding:28px 20px 60px;
+  }
+  header{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:8px;
+    border-bottom:1px solid var(--line);
+    padding-bottom:18px;
+    margin-bottom:26px;
+  }
+  .wordmark{
+    font-size:26px;
+    font-weight:700;
+    letter-spacing:0.01em;
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  .wordmark .dots{
+    display:inline-flex;
+    gap:3px;
+  }
+  .wordmark .dots span{
+    width:9px;height:9px;border-radius:50%;
+    display:inline-block;
+  }
+  .dots span:nth-child(1){background:var(--cyan);}
+  .dots span:nth-child(2){background:var(--magenta);}
+  .dots span:nth-child(3){background:var(--yellow);}
+  .dots span:nth-child(4){background:var(--key);}
+  header .sub{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12.5px;
+    color:var(--dim);
+    max-width:420px;
+    line-height:1.5;
+  }
+  main{
+    display:grid;
+    grid-template-columns:300px 1fr;
+    gap:22px;
+  }
+  @media (max-width:820px){
+    main{grid-template-columns:1fr;}
+  }
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:18px;
+  }
+  .field{
+    margin-bottom:18px;
+  }
+  .field:last-child{margin-bottom:0;}
+  .field-label{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    font-size:13px;
+    color:var(--text);
+    margin-bottom:8px;
+  }
+  .field-label .val{
+    font-family:'IBM Plex Mono',monospace;
+    color:var(--dim);
+    font-size:12px;
+  }
+  input[type="range"]{
+    width:100%;
+    accent-color:var(--cyan);
+  }
+  select, input[type="color"], input[type="file"]{
+    width:100%;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    color:var(--text);
+    padding:8px 9px;
+    border-radius:var(--radius);
+    font-family:'Space Grotesk',sans-serif;
+    font-size:13.5px;
+  }
+  input[type="color"]{padding:3px;height:34px;}
+  .dropzone{
+    border:1px dashed var(--line);
+    border-radius:var(--radius);
+    padding:22px 12px;
+    text-align:center;
+    font-size:12.5px;
+    color:var(--dim);
+    cursor:pointer;
+    transition:border-color .15s ease;
+  }
+  .dropzone.drag{border-color:var(--cyan); color:var(--text);}
+  .dropzone input{display:none;}
+  .angle-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px 12px;
+  }
+  .angle-item label{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-size:12px;
+    color:var(--dim);
+    margin-bottom:4px;
+  }
+  .swatch{width:9px;height:9px;border-radius:50%;display:inline-block;}
+  .angle-item input{
+    width:100%;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    color:var(--text);
+    padding:6px 7px;
+    border-radius:var(--radius);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12.5px;
+  }
+  .btn{
+    width:100%;
+    padding:11px 12px;
+    border-radius:var(--radius);
+    border:1px solid var(--line);
+    background:var(--panel-2);
+    color:var(--text);
+    font-family:'Space Grotesk',sans-serif;
+    font-size:13.5px;
+    font-weight:500;
+    cursor:pointer;
+    transition:border-color .15s ease, background .15s ease;
+  }
+  .btn:hover{border-color:var(--dim);}
+  .btn.primary{
+    background:var(--key);
+    color:var(--ink);
+    border-color:var(--key);
+    font-weight:700;
+  }
+  .btn.primary:hover{opacity:.92;}
+  .btn:disabled{opacity:.45; cursor:not-allowed;}
+  .row-gap{margin-top:10px;}
+  .toggle-row{
+    display:flex;
+    gap:8px;
+  }
+  .toggle-row .btn{font-size:12.5px; padding:8px 10px;}
+  .toggle-row .btn.active{
+    background:var(--cyan);
+    border-color:var(--cyan);
+    color:#04252e;
+    font-weight:700;
+  }
+  .preview-panel{
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+  }
+  .canvas-frame{
+    position:relative;
+    background:var(--paper);
+    border-radius:var(--radius);
+    padding:26px;
+    min-height:340px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+  }
+  .canvas-frame canvas.bg-checker{
+    background:
+      linear-gradient(45deg,#d8d4c6 25%,transparent 25%) -8px 0/16px 16px,
+      linear-gradient(-45deg,#d8d4c6 25%,transparent 25%) -8px 0/16px 16px,
+      linear-gradient(45deg,transparent 75%,#d8d4c6 75%) -8px 0/16px 16px,
+      linear-gradient(-45deg,transparent 75%,#d8d4c6 75%) -8px 0/16px 16px,
+      #ece8db;
+  }
+  .canvas-frame canvas.bg-white{ background:#ffffff; }
+  .canvas-frame canvas.bg-black{ background:#111111; }
+  .placeholder{
+    font-family:'IBM Plex Mono',monospace;
+    color:#8a8672;
+    font-size:12.5px;
+    text-align:center;
+  }
+  .reg-mark{
+    position:absolute;
+    width:18px;height:18px;
+    opacity:.55;
+  }
+  .reg-mark svg{width:100%;height:100%;}
+  .reg-mark.tl{top:8px;left:8px;}
+  .reg-mark.tr{top:8px;right:8px;}
+  .reg-mark.bl{bottom:8px;left:8px;}
+  .reg-mark.br{bottom:8px;right:8px;}
+  .status-line{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    color:var(--dim);
+    display:flex;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:6px;
+  }
+  .status-line b{color:var(--text); font-weight:500;}
+  .footnote{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;
+    color:var(--dim);
+    line-height:1.6;
+    margin-top:6px;
+  }
+  hr.sep{
+    border:none;
+    border-top:1px solid var(--line);
+    margin:18px 0;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="wordmark">
+      TRAMA
+      <span class="dots"><span></span><span></span><span></span><span></span></span>
+    </div>
+    <div class="sub">Separación en medios tonos angulados para simular proceso serigráfico sobre impresión DTG. Todo corre en tu navegador — ninguna imagen sale de tu equipo.</div>
+  </header>
+
+  <main>
+    <div class="panel">
+      <div class="field">
+        <div class="field-label">Imagen de origen</div>
+        <label class="dropzone" id="dropzone">
+          <span id="dz-label">Arrastra un archivo o haz clic para elegir</span>
+          <input type="file" id="fileInput" accept="image/*">
+        </label>
+      </div>
+
+      <div class="field">
+        <div class="field-label">Modo de separación</div>
+        <select id="mode">
+          <option value="cmyk">Proceso simulado (4 tintas CMYK)</option>
+          <option value="spot">Tinta plana (1 color)</option>
+          <option value="alpha">Perforar alpha (mantiene color)</option>
+        </select>
+      </div>
+
+      <div class="field" id="spotColorField" style="display:none;">
+        <div class="field-label">Color de tinta</div>
+        <input type="color" id="spotColor" value="#111111">
+      </div>
+
+      <div class="field">
+        <div class="field-label"><span>Tamaño de trama</span><span class="val" id="cellVal">10 px</span></div>
+        <input type="range" id="cellSize" min="4" max="30" value="10">
+        <div class="footnote">Menos px = punto más fino, más parecido a foto. Más px = punto grande, look serigrafía retro. Para DTG a 300&nbsp;DPI, 8–14&nbsp;px ronda las 25–35&nbsp;LPI.</div>
+      </div>
+
+      <div class="field" id="angleFieldCmyk">
+        <div class="field-label">Ángulos por canal</div>
+        <div class="angle-grid">
+          <div class="angle-item">
+            <label><span class="swatch" style="background:var(--cyan)"></span>Cian</label>
+            <input type="number" id="angC" value="15">
+          </div>
+          <div class="angle-item">
+            <label><span class="swatch" style="background:var(--magenta)"></span>Magenta</label>
+            <input type="number" id="angM" value="75">
+          </div>
+          <div class="angle-item">
+            <label><span class="swatch" style="background:var(--yellow)"></span>Amarillo</label>
+            <input type="number" id="angY" value="0">
+          </div>
+          <div class="angle-item">
+            <label><span class="swatch" style="background:var(--key)"></span>Negro</label>
+            <input type="number" id="angK" value="45">
+          </div>
+        </div>
+      </div>
+
+      <div class="field" id="angleFieldSpot" style="display:none;">
+        <div class="field-label"><span>Ángulo de trama</span><span class="val" id="angleSpotVal">45°</span></div>
+        <input type="range" id="angleSpot" min="0" max="90" value="45">
+      </div>
+
+      <div class="field" id="alphaFields" style="display:none;">
+        <div class="field-label"><span>Radio máximo del agujero</span><span class="val" id="maxRadiusVal">6 px</span></div>
+        <input type="range" id="maxRadius" min="1" max="20" value="6">
+        <div class="field-label row-gap"><span>Umbral (curva)</span><span class="val" id="thresholdVal">90</span></div>
+        <input type="range" id="threshold" min="1" max="255" value="90">
+        <div class="footnote">Umbral bajo = agujeros más grandes desde medios tonos (más aire, más ahorro). Umbral alto = solo perfora sombras reales (tacto más suave, look más sólido).</div>
+      </div>
+
+      <div class="field">
+        <div class="field-label">Forma del punto</div>
+        <select id="shape">
+          <option value="circle">Círculo</option>
+          <option value="square">Cuadrado</option>
+          <option value="diamond">Diamante</option>
+          <option value="ring">Anillo</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <div class="field-label">Resolución de trabajo</div>
+        <select id="workRes">
+          <option value="800">Rápida (800 px)</option>
+          <option value="1200" selected>Media (1200 px)</option>
+          <option value="1800">Alta (1800 px, más lenta)</option>
+        </select>
+      </div>
+
+      <div class="field" id="bgField">
+        <div class="field-label">Fondo</div>
+        <div class="toggle-row">
+          <button class="btn active" id="bgWhite" data-bg="white">Blanco</button>
+          <button class="btn" id="bgTransparent" data-bg="transparent">Transparente</button>
+        </div>
+      </div>
+      <div class="field footnote" id="alphaBgNote" style="display:none;">En este modo la salida siempre es un PNG transparente — el objetivo es perforar el alpha, no pintar un fondo.</div>
+
+      <hr class="sep">
+
+      <button class="btn primary" id="processBtn" disabled>Generar trama</button>
+      <div class="row-gap">
+        <button class="btn" id="downloadBtn" disabled>Descargar PNG</button>
+      </div>
+    </div>
+
+    <div class="preview-panel">
+      <div class="canvas-frame" id="canvasFrame">
+        <div class="reg-mark tl"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="none" stroke="#8a8672" stroke-width="1"/><line x1="12" y1="0" x2="12" y2="24" stroke="#8a8672" stroke-width="1"/><line x1="0" y1="12" x2="24" y2="12" stroke="#8a8672" stroke-width="1"/></svg></div>
+        <div class="reg-mark tr"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="none" stroke="#8a8672" stroke-width="1"/><line x1="12" y1="0" x2="12" y2="24" stroke="#8a8672" stroke-width="1"/><line x1="0" y1="12" x2="24" y2="12" stroke="#8a8672" stroke-width="1"/></svg></div>
+        <div class="reg-mark bl"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="none" stroke="#8a8672" stroke-width="1"/><line x1="12" y1="0" x2="12" y2="24" stroke="#8a8672" stroke-width="1"/><line x1="0" y1="12" x2="24" y2="12" stroke="#8a8672" stroke-width="1"/></svg></div>
+        <div class="reg-mark br"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="none" stroke="#8a8672" stroke-width="1"/><line x1="12" y1="0" x2="12" y2="24" stroke="#8a8672" stroke-width="1"/><line x1="0" y1="12" x2="24" y2="12" stroke="#8a8672" stroke-width="1"/></svg></div>
+        <div class="placeholder" id="placeholder">Sube una imagen para empezar<br>(idealmente ya sin fondo, PNG)</div>
+        <canvas id="outCanvas" class="bg-checker" style="display:none;"></canvas>
+      </div>
+      <div class="status-line">
+        <span>estado: <b id="statusText">esperando imagen</b></span>
+        <span id="dimsText"></span>
+      </div>
+      <div class="field-label">Vista previa sobre</div>
+      <div class="toggle-row">
+        <button class="btn active" id="prevChecker" data-preview="checker">Tablero</button>
+        <button class="btn" id="prevWhite" data-preview="white">Polera blanca</button>
+        <button class="btn" id="prevBlack" data-preview="black">Polera negra</button>
+      </div>
+      <div class="footnote">Esto solo cambia el fondo detrás para que veas el efecto — no se guarda en el PNG que descargas.</div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+  const dropzone = document.getElementById('dropzone');
+  const dzLabel = document.getElementById('dz-label');
+  const fileInput = document.getElementById('fileInput');
+  const modeSel = document.getElementById('mode');
+  const spotColorField = document.getElementById('spotColorField');
+  const spotColorInput = document.getElementById('spotColor');
+  const angleFieldCmyk = document.getElementById('angleFieldCmyk');
+  const angleFieldSpot = document.getElementById('angleFieldSpot');
+  const angleSpot = document.getElementById('angleSpot');
+  const angleSpotVal = document.getElementById('angleSpotVal');
+  const cellSize = document.getElementById('cellSize');
+  const cellVal = document.getElementById('cellVal');
+  const shapeSel = document.getElementById('shape');
+  const workRes = document.getElementById('workRes');
+  const angC = document.getElementById('angC');
+  const angM = document.getElementById('angM');
+  const angY = document.getElementById('angY');
+  const angK = document.getElementById('angK');
+  const bgWhiteBtn = document.getElementById('bgWhite');
+  const bgTransBtn = document.getElementById('bgTransparent');
+  const bgField = document.getElementById('bgField');
+  const alphaBgNote = document.getElementById('alphaBgNote');
+  const alphaFields = document.getElementById('alphaFields');
+  const maxRadius = document.getElementById('maxRadius');
+  const maxRadiusVal = document.getElementById('maxRadiusVal');
+  const threshold = document.getElementById('threshold');
+  const thresholdVal = document.getElementById('thresholdVal');
+  const prevChecker = document.getElementById('prevChecker');
+  const prevWhite = document.getElementById('prevWhite');
+  const prevBlack = document.getElementById('prevBlack');
+
+  const previewBtns = {checker:prevChecker, white:prevWhite, black:prevBlack};
+  function setPreviewBg(kind){
+    outCanvas.classList.remove('bg-checker','bg-white','bg-black');
+    outCanvas.classList.add('bg-' + kind);
+    Object.entries(previewBtns).forEach(([k,btn])=> btn.classList.toggle('active', k===kind));
+  }
+  prevChecker.addEventListener('click', ()=> setPreviewBg('checker'));
+  prevWhite.addEventListener('click', ()=> setPreviewBg('white'));
+  prevBlack.addEventListener('click', ()=> setPreviewBg('black'));
+  const processBtn = document.getElementById('processBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const outCanvas = document.getElementById('outCanvas');
+  const placeholder = document.getElementById('placeholder');
+  const statusText = document.getElementById('statusText');
+  const dimsText = document.getElementById('dimsText');
+
+  let sourceImg = null;
+  let bgMode = 'white';
+  let channels = null; // {c,m,y,k,ink,w,h}
+
+  modeSel.addEventListener('change', ()=>{
+    const mode = modeSel.value;
+    const spot = mode === 'spot';
+    const alpha = mode === 'alpha';
+    const cmyk = mode === 'cmyk';
+    spotColorField.style.display = spot ? 'block' : 'none';
+    angleFieldCmyk.style.display = cmyk ? 'block' : 'none';
+    angleFieldSpot.style.display = (spot || alpha) ? 'block' : 'none';
+    alphaFields.style.display = alpha ? 'block' : 'none';
+    bgField.style.display = alpha ? 'none' : 'block';
+    alphaBgNote.style.display = alpha ? 'block' : 'none';
+  });
+
+  cellSize.addEventListener('input', ()=> cellVal.textContent = cellSize.value + ' px');
+  angleSpot.addEventListener('input', ()=> angleSpotVal.textContent = angleSpot.value + '°');
+  maxRadius.addEventListener('input', ()=> maxRadiusVal.textContent = maxRadius.value + ' px');
+  threshold.addEventListener('input', ()=> thresholdVal.textContent = threshold.value);
+
+  bgWhiteBtn.addEventListener('click', ()=>{ bgMode='white'; bgWhiteBtn.classList.add('active'); bgTransBtn.classList.remove('active'); });
+  bgTransBtn.addEventListener('click', ()=>{ bgMode='transparent'; bgTransBtn.classList.add('active'); bgWhiteBtn.classList.remove('active'); });
+
+  ['dragenter','dragover'].forEach(ev=>{
+    dropzone.addEventListener(ev, e=>{ e.preventDefault(); dropzone.classList.add('drag'); });
+  });
+  ['dragleave','drop'].forEach(ev=>{
+    dropzone.addEventListener(ev, e=>{ e.preventDefault(); dropzone.classList.remove('drag'); });
+  });
+  dropzone.addEventListener('drop', e=>{
+    const f = e.dataTransfer.files[0];
+    if(f) loadFile(f);
+  });
+  fileInput.addEventListener('change', e=>{
+    const f = e.target.files[0];
+    if(f) loadFile(f);
+  });
+
+  function loadFile(file){
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = ()=>{
+      sourceImg = img;
+      dzLabel.textContent = file.name;
+      processBtn.disabled = false;
+      statusText.textContent = 'imagen cargada, lista para generar';
+      buildChannels();
+    };
+    img.src = url;
+  }
+
+  function buildChannels(){
+    const maxW = parseInt(workRes.value, 10);
+    let w = sourceImg.width, h = sourceImg.height;
+    if (w > maxW){ h = Math.round(h * (maxW / w)); w = maxW; }
+
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const tctx = tmp.getContext('2d');
+    tctx.clearRect(0,0,w,h);
+    tctx.drawImage(sourceImg, 0, 0, w, h);
+    const data = tctx.getImageData(0,0,w,h).data;
+
+    const n = w*h;
+    const c = new Float32Array(n), m = new Float32Array(n), y = new Float32Array(n),
+          k = new Float32Array(n), ink = new Float32Array(n);
+
+    for (let i=0, p=0; i<n; i++, p+=4){
+      const r = data[p]/255, g = data[p+1]/255, b = data[p+2]/255, a = data[p+3]/255;
+      const kk = 1 - Math.max(r,g,b);
+      let cc, mm, yy;
+      if (kk >= 0.999){ cc=0; mm=0; yy=0; }
+      else { cc=(1-r-kk)/(1-kk); mm=(1-g-kk)/(1-kk); yy=(1-b-kk)/(1-kk); }
+      c[i]=cc*a; m[i]=mm*a; y[i]=yy*a; k[i]=kk*a;
+      ink[i]=(1-(0.299*r+0.587*g+0.114*b))*a;
+    }
+    channels = {c,m,y,k,ink,w,h,imageCanvas:tmp};
+    dimsText.textContent = w + ' × ' + h + ' px (trabajo)';
+  }
+
+  function sampleAt(arr, w, h, x, y){
+    const xi = Math.round(x), yi = Math.round(y);
+    if (xi<0 || yi<0 || xi>=w || yi>=h) return 0;
+    return arr[yi*w+xi];
+  }
+
+  function renderChannel(ctx, w, h, angleDeg, cell, arr, fillStyle, shape, radiusFn){
+    const angle = angleDeg * Math.PI/180;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    const cx = w/2, cy = h/2;
+    const diag = Math.sqrt(w*w+h*h);
+    const steps = Math.ceil(diag/cell/2) + 1;
+    if (!radiusFn){
+      const maxR = (cell/2) * 1.18;
+      radiusFn = (tone)=> maxR * Math.sqrt(tone);
+    }
+
+    ctx.save();
+    ctx.fillStyle = fillStyle;
+    for (let iy=-steps; iy<=steps; iy++){
+      const gy = iy*cell;
+      for (let ix=-steps; ix<=steps; ix++){
+        const gx = ix*cell;
+        const px = cx + gx*cos - gy*sin;
+        const py = cy + gx*sin + gy*cos;
+        if (px < -cell || px > w+cell || py < -cell || py > h+cell) continue;
+        const tone = sampleAt(arr, w, h, px, py);
+        if (tone <= 0.005) continue;
+        const r = radiusFn(tone);
+        if (r < 0.35) continue;
+        ctx.beginPath();
+        if (shape === 'circle'){
+          ctx.arc(px, py, r, 0, Math.PI*2);
+        } else if (shape === 'square'){
+          ctx.rect(px-r, py-r, r*2, r*2);
+        } else if (shape === 'ring'){
+          ctx.arc(px, py, r, 0, Math.PI*2);
+          ctx.arc(px, py, r*0.45, 0, Math.PI*2, true);
+        } else {
+          ctx.moveTo(px, py-r); ctx.lineTo(px+r, py); ctx.lineTo(px, py+r); ctx.lineTo(px-r, py); ctx.closePath();
+        }
+        ctx.fill('evenodd');
+      }
+    }
+    ctx.restore();
+  }
+
+  function process(){
+    if (!channels) return;
+    statusText.textContent = 'generando…';
+    processBtn.disabled = true;
+    setTimeout(()=>{
+      const {w,h} = channels;
+      outCanvas.width = w; outCanvas.height = h;
+      const ctx = outCanvas.getContext('2d');
+      ctx.clearRect(0,0,w,h);
+      if (bgMode === 'white'){
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0,0,w,h);
+      }
+
+      const cell = parseInt(cellSize.value, 10);
+      const shape = shapeSel.value;
+
+      if (modeSel.value === 'cmyk'){
+        const layers = [
+          {arr:channels.c, color:'#00AEEF', angle:parseFloat(angC.value)},
+          {arr:channels.m, color:'#EC008C', angle:parseFloat(angM.value)},
+          {arr:channels.y, color:'#FFE000', angle:parseFloat(angY.value)},
+          {arr:channels.k, color:'#111111', angle:parseFloat(angK.value)}
+        ];
+        layers.forEach(layer=>{
+          const off = document.createElement('canvas');
+          off.width = w; off.height = h;
+          const octx = off.getContext('2d');
+          renderChannel(octx, w, h, layer.angle, cell, layer.arr, layer.color, shape);
+          ctx.globalCompositeOperation = 'multiply';
+          ctx.drawImage(off, 0, 0);
+        });
+        ctx.globalCompositeOperation = 'source-over';
+      } else if (modeSel.value === 'spot'){
+        renderChannel(ctx, w, h, parseFloat(angleSpot.value), cell, channels.ink, spotColorInput.value, shape);
+      } else {
+        // modo alpha: conserva el color original y perfora el canal alpha con la trama
+        ctx.clearRect(0,0,w,h);
+        ctx.drawImage(channels.imageCanvas, 0, 0, w, h);
+
+        const maxR = parseFloat(maxRadius.value);
+        const exponent = Math.max(0.15, parseFloat(threshold.value) / 55);
+        const radiusFn = (tone)=> maxR * Math.pow(tone, exponent);
+
+        const mask = document.createElement('canvas');
+        mask.width = w; mask.height = h;
+        const mctx = mask.getContext('2d');
+        mctx.fillStyle = 'rgba(0,0,0,1)';
+        mctx.fillRect(0,0,w,h);
+        mctx.globalCompositeOperation = 'destination-out';
+        renderChannel(mctx, w, h, parseFloat(angleSpot.value), cell, channels.ink, 'rgba(0,0,0,1)', shape, radiusFn);
+
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(mask, 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      placeholder.style.display = 'none';
+      outCanvas.style.display = 'block';
+      downloadBtn.disabled = false;
+      processBtn.disabled = false;
+      statusText.textContent = 'trama generada';
+    }, 20);
+  }
+
+  processBtn.addEventListener('click', process);
+  workRes.addEventListener('change', ()=>{ if (sourceImg){ buildChannels(); } });
+
+  downloadBtn.addEventListener('click', ()=>{
+    const link = document.createElement('a');
+    link.download = 'trama-dtg.png';
+    link.href = outCanvas.toDataURL('image/png');
+    link.click();
+  });
+})();
+</script>
+</body>
+</html>

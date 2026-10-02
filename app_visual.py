@@ -127,8 +127,147 @@ frases_sueltas_texto = st.text_input(
 )
 st.caption("El título y las frases los dibuja Gemini como parte del diseño.")
 
+# --- Ajustes avanzados opcionales de diseño y pose ---
+with st.expander("🎨 5. Ajustes avanzados de diseño y pose (Opcionales)", expanded=False):
+    st.caption("Si dejas estos campos en 'Auto' o vacíos, la IA seguirá libremente la referencia y el sujeto.")
+
+    st.markdown("##### 👤 Sujeto: Pose, Encuadre y Expresión")
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        pose_personalizada = st.text_input(
+            "Pose o acción del sujeto",
+            placeholder="ej: Brazos cruzados mirando al frente / Saltando...",
+            help="Describe la postura o acción exacta en la que quieres que aparezca el sujeto.",
+        )
+        encuadre = st.selectbox(
+            "Encuadre / Tipo de plano",
+            [
+                "Auto (según referencia)",
+                "Primer plano dramático (Close-up / Rostro)",
+                "Plano medio (Busto / Pecho arriba)",
+                "Cuerpo entero (Full body)",
+            ],
+        )
+    with col_p2:
+        expresion = st.selectbox(
+            "Expresión / Actitud",
+            [
+                "Auto",
+                "Seria / Desafiante / Badass",
+                "Sonriente / Alegre",
+                "Melancólica / Nostálgica",
+                "Grito / Euforia / Rock",
+                "Misteriosa / Neutra",
+            ],
+        )
+        distribucion_figuras = st.selectbox(
+            "Distribución y cantidad de figuras",
+            [
+                "Auto (según referencia)",
+                "1 sola figura dominante (Hero central)",
+                "2-3 figuras (Doble exposición / Principal + secundarias)",
+                "Collage múltiple (4 a 6 elementos)",
+                "Cuadrícula / Catálogo de especímenes",
+            ],
+        )
+
+    st.markdown("##### 🖌️ Estilo, Técnica y Acabado Textil")
+    nivel_estilizacion = st.selectbox(
+        "Nivel de estilización / Fidelidad al estilo",
+        [
+            "Transformación artística total (Recomendado: máxima fidelidad de estilo)",
+            "Equilibrado (Fusión entre estilo y foto original)",
+            "Conservar fisonomía fotográfica",
+        ],
+        index=0,
+        help="Define qué tanto adapta la IA al sujeto al estilo del dibujo de referencia frente a mantener su foto realista.",
+    )
+
+    col_t1, col_t2 = st.columns(2)
+    with col_t1:
+        tecnica_artistica = st.selectbox(
+            "Técnica artística (Sobrescribir referencia)",
+            [
+                "Auto (según referencia)",
+                "Vintage Bootleg Rap Tee 90s",
+                "Grabado botánico / Ilustración científica vintage",
+                "Ilustración vectorial nítida / Anime",
+                "Psicodélico retro años 70",
+                "Estilo Tatuaje tradicional / Neo-tradicional",
+                "Streetwear minimalista / Cyberpunk Y2K",
+            ],
+        )
+        acabado_textil = st.selectbox(
+            "Acabado / Textura de estampado",
+            [
+                "Auto",
+                "Sin desgaste (Digital limpio)",
+                "Desgaste vintage suave (Distressed)",
+                "Trama de puntos de serigrafía (Halftone dots)",
+                "Desgaste grunge / ácido 90s marcado",
+            ],
+        )
+    with col_t2:
+        bordes = st.selectbox(
+            "Integración de bordes",
+            [
+                "Auto",
+                "Bordes difuminados / fundidos suaves (Fade)",
+                "Enmarcado en recuadro / caja (Box print)",
+                "Bordes rotos / rasgados vintage",
+            ],
+        )
+        iluminacion = st.selectbox(
+            "Iluminación y atmósfera",
+            [
+                "Auto",
+                "Luz de estudio suave y neutra",
+                "Contraste dramático / Claroscuro",
+                "Iluminación de concierto / Neones y reflectores",
+                "Luz dorada cálida (Golden hour)",
+            ],
+        )
+
+    st.markdown("##### ✨ Acentos, Instrucciones y Formato")
+    acentos_graficos = st.multiselect(
+        "Acentos gráficos secundarios a incluir",
+        [
+            "Destellos y estrellas 90s (Sparkles)",
+            "Rayos / Relámpagos",
+            "Fuego / Llamas estilizadas",
+            "Flores / Elementos botánicos",
+            "Sellos / Códigos y etiquetas técnicas",
+            "Humo / Niebla de fondo",
+        ],
+    )
+
+    col_i1, col_i2 = st.columns(2)
+    with col_i1:
+        instrucciones_extra = st.text_area(
+            "Instrucciones puntuales adicionales",
+            placeholder="ej: Que tenga lentes de sol oscuros puestos, relieve cromado brillante en las letras...",
+            height=80,
+        )
+    with col_i2:
+        elementos_a_evitar = st.text_area(
+            "Cosas que NO quieres ver (Negativo)",
+            placeholder="ej: Sin marcos cuadrados, sin deformaciones en las manos, sin logos ajenos...",
+            height=80,
+        )
+
+    proporcion_estampado = st.selectbox(
+        "Formato / Proporción del estampado",
+        [
+            "3:4 (Vertical polera clásico - 1620x2160)",
+            "1:1 (Cuadrado de pecho - 2048x2048)",
+            "9:16 (Vertical largo / Back print - 1215x2160)",
+            "4:3 (Horizontal de pecho - 2160x1620)",
+        ],
+        index=0,
+    )
+
 # --- Modelo de IA a usar (último paso, define el costo) ---
-st.subheader("5. Calidad / costo de la generación")
+st.subheader("6. Calidad / costo de la generación")
 nombre_modelo = st.select_slider(
     "Elige qué tan barato o bueno quieres el resultado",
     options=list(MODELOS_IMAGEN.keys()),
@@ -166,6 +305,19 @@ if st.button("✨ Generar diseño", type="primary", use_container_width=True):
                     color_fondo_solido=color_fondo_solido,
                     descripcion_sujeto=descripcion_sujeto,
                     tipo_sujeto=tipo_sujeto,
+                    pose_personalizada=pose_personalizada,
+                    encuadre=encuadre,
+                    expresion=expresion,
+                    distribucion_figuras=distribucion_figuras,
+                    tecnica_artistica=tecnica_artistica,
+                    acabado_textil=acabado_textil,
+                    bordes=bordes,
+                    iluminacion=iluminacion,
+                    acentos_graficos=acentos_graficos,
+                    instrucciones_extra=instrucciones_extra,
+                    elementos_a_evitar=elementos_a_evitar,
+                    proporcion_estampado=proporcion_estampado,
+                    nivel_estilizacion=nivel_estilizacion,
                 )
                 st.success("¡Listo!")
                 st.image(resultado, caption="Diseño generado", use_container_width=True)

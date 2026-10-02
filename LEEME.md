@@ -98,6 +98,18 @@ pasan juntas a Gemini para que entienda mejor su apariencia desde distintos
   prompt ahora le pide explícitamente a Gemini que varíe la pose/ángulo en
   cada una, para que no salga repetida.
 
+## Ajustes avanzados opcionales de diseño y pose (Paso 5)
+
+En la interfaz visual encontrarás un menú desplegable con controles de diseño totalmente opcionales:
+- **Pose y acción:** escribe en texto la postura o acción deseada (ej: brazos cruzados, saltando).
+- **Encuadre y Expresión:** plano medio, cuerpo entero, close-up; actitud seria/badass, alegre, etc.
+- **Distribución de figuras:** forzar 1 sola figura heroica, 2-3 figuras tipo doble exposición, o collage múltiple.
+- **Técnica artística y acabado textil:** sobrescribir la técnica (bootleg 90s, grabado científico, etc.) y acabado (trama de puntos de serigrafía / halftone, desgaste vintage suave).
+- **Acentos gráficos:** agregar sparkles 90s, rayos, fuego, flores o etiquetas de merch.
+- **Formato del estampado:** 3:4 (vertical polera), 1:1 (cuadrado pecho), 9:16 (vertical largo), 4:3 (horizontal).
+- **Instrucciones libres y qué evitar (negativo):** detalles puntuales o exclusiones estrictas.
+Si los dejas vacíos o en "Auto", el diseño se arma automáticamente según la referencia.
+
 ## Fuentes del título
 
 Se volvió a la generación directa: el título y las frases sueltas los dibuja
