@@ -21,6 +21,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Pre-descargar modelo u2net de rembg durante el build para evitar descargas en tiempo de ejecución en Contabo
+RUN python -c "import rembg; from PIL import Image; rembg.remove(Image.new('RGB', (16, 16)))"
+
 # Copiar el resto del código del proyecto
 COPY . .
 

@@ -2,16 +2,13 @@
 Generador de diseños de poleras.
 
 Flujo:
-1. Analiza la(s) imagen(es) de referencia (estructura/composición) -> Gemini Flash (barato)
-2. Si corresponde, quita el fondo de la(s) foto(s) del personaje -> rembg (local, gratis)
-3. Arma el prompt final combinando: estructura + colores + texto + poses variadas
-4. Genera la imagen final -> el modelo de imagen que el usuario haya elegido (Lite/Media/Pro)
-5. Si no se pidió un color de fondo sólido específico, se le quita el fondo con rembg
-
-NOTA: el SDK de Google (google-genai) cambia de vez en cuando sus nombres de métodos
-y de modelos. Si algo falla al correr esto, lo primero es revisar la documentación
-actual en https://ai.google.dev/gemini-api/docs para confirmar que los nombres
-siguen siendo los mismos.
+1. Valida imágenes y conexión previa.
+2. Analiza el sujeto (o usa descripción directa/caché para ahorrar tokens).
+3. Analiza la(s) imagen(es) de referencia (estructura/composición) -> Gemini Flash (barato).
+4. Si corresponde, quita el fondo de la(s) foto(s) del personaje -> rembg (local, gratis).
+5. Arma el prompt maestro final combinando: estructura + colores + texto + poses variadas.
+6. Genera la imagen final con Gemini Image (Lite/Media/Pro) con inspección forense de seguridad y cuota.
+7. Aplica recorte chroma determinístico o deja fondo sólido según configuración.
 """
 
 import os
@@ -19,7 +16,9 @@ import sys
 import io
 import json
 import re
+import time
 import colorsys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,20 +29,140 @@ from colorthief import ColorThief
 
 load_dotenv()
 
-API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    raise RuntimeError(
-        "No encontré GEMINI_API_KEY. Copia .env.example como .env y pega tu key ahí."
+
+class ErrorProcesoPolera(Exception):
+    """
+    Excepción estructurada para capturar con precisión en qué fase y por qué falló el proceso,
+    evitando que el usuario pierda tokens sin saber la causa.
+    """
+    def __init__(
+        self,
+        fase: str,
+        mensaje: str,
+        diagnostico: str = "",
+        sugerencia: str = "",
+        error_original: Exception | None = None,
+        detalle_tecnico: str = "",
+        tokens_gastados: dict | None = None,
+    ):
+        super().__init__(mensaje)
+        self.fase = fase
+        self.mensaje = mensaje
+        self.diagnostico = diagnostico
+        self.sugerencia = sugerencia
+        self.error_original = error_original
+        self.detalle_tecnico = detalle_tecnico or (str(error_original) if error_original else "")
+        self.tokens_gastados = tokens_gastados or {}
+
+
+def diagnosticar_error_api(e: Exception) -> tuple[str, str]:
+    """
+    Analiza una excepción de Google GenAI o del sistema y devuelve (diagnostico, sugerencia).
+    """
+    err_str = str(e).lower()
+
+    if "429" in err_str or "resource_exhausted" in err_str or "quota" in err_str:
+        return (
+            "Se ha agotado la cuota de peticiones o el límite de saldo configurado en tu cuenta de Google AI Studio.",
+            "Revisa tu cuenta en https://aistudio.google.com/ para verificar el saldo de facturación o espera un minuto a que se restablezca el límite por minuto (RPM/TPM).",
+        )
+    if "403" in err_str or "permission_denied" in err_str or "unregistered" in err_str:
+        return (
+            "Problema de permisos o clave de API no válida en Google AI Studio.",
+            "Revisa tu clave en el archivo .env (GEMINI_API_KEY). Asegúrate de que no tenga comillas ni espacios adicionales y que el proyecto tenga habilitada la API de Gemini.",
+        )
+    if "404" in err_str or "not_found" in err_str:
+        return (
+            "El modelo solicitado ya no está disponible o cambió de nombre en la API de Google.",
+            "Google actualiza periódicamente sus modelos. Prueba seleccionando otro modelo en el menú de Calidad/Costo.",
+        )
+    if "400" in err_str or "invalid_argument" in err_str:
+        return (
+            "La petición fue rechazada por argumentos o formato de imagen no válido.",
+            "Verifica que las imágenes subidas no estén dañadas o tengan formatos atípicos, o reduce la cantidad de imágenes subidas.",
+        )
+    if "safety" in err_str or "blocked" in err_str or "prohibited" in err_str:
+        return (
+            "La generación fue bloqueada por las políticas de contenido o derechos de autor de Google.",
+            "Modifica el título o la descripción del sujeto para evitar nombres de celebridades, marcas con copyright fuerte o términos sensibles.",
+        )
+    if "memory" in err_str or "out of memory" in err_str or "killed" in err_str:
+        return (
+            "El servidor se quedó sin memoria RAM al procesar las imágenes.",
+            "Si estás corriendo en un VPS Contabo con 2GB/4GB de RAM, desmarca la opción 'Recortar solo al personaje' o sube imágenes más livianas.",
+        )
+    if "connection" in err_str or "timeout" in err_str or "timed out" in err_str:
+        return (
+            "Tiempo de espera agotado o corte de red con los servidores de Google AI Studio.",
+            "Verifica la conexión a internet de tu servidor y vuelve a intentar.",
+        )
+
+    return (
+        f"Error en la llamada: {e}",
+        "Revisa la consola de detalles técnicos para ver el error completo.",
     )
 
-client = genai.Client(api_key=API_KEY)
 
-# Modelo usado para analizar imágenes (barato, no es el que genera el diseño final)
-MODELO_VISION = "gemini-3.6-flash"
+def obtener_cliente_gemini() -> genai.Client:
+    """Devuelve una instancia configurada de genai.Client o lanza ErrorProcesoPolera si falta la key."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ErrorProcesoPolera(
+            fase="Validación de Credenciales",
+            mensaje="No se encontró la variable GEMINI_API_KEY.",
+            diagnostico="El archivo .env no existe o no contiene una clave de API válida.",
+            sugerencia="Copia .env.example como .env y coloca tu GEMINI_API_KEY de https://aistudio.google.com/.",
+        )
+    return genai.Client(api_key=api_key)
 
-# Modelos de generación de imagen disponibles para elegir en la interfaz, de más
-# barato a más caro. Verifica en ai.google.dev/gemini-api/docs/models si estos
-# nombres siguen vigentes -- Google los actualiza de vez en cuando.
+
+def validar_conexion_api() -> dict:
+    """
+    Verifica rápidamente la conectividad con la API de Gemini antes de procesar archivos.
+    Devuelve un diccionario con el estado.
+    """
+    try:
+        client = obtener_cliente_gemini()
+        resp = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents="ping",
+        )
+        return {"ok": True, "mensaje": "Conexión exitosa con Google AI Studio"}
+    except Exception as e:
+        diag, sug = diagnosticar_error_api(e)
+        return {
+            "ok": False,
+            "mensaje": str(e),
+            "diagnostico": diag,
+            "sugerencia": sug,
+        }
+
+
+def _notificar_progreso(
+    callback,
+    etapa_idx: int,
+    total_etapas: int,
+    fase: str,
+    mensaje: str,
+    estado: str = "running",
+    detalle: dict | None = None,
+):
+    """Emite evento de progreso tanto a consola (stdout/docker logs) como al callback de UI."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    simbolo = {"running": "⏳", "success": "✅", "warning": "⚠️", "error": "❌", "info": "ℹ️"}.get(estado, "•")
+    print(f"[{timestamp}] {simbolo} [{etapa_idx}/{total_etapas}] {fase}: {mensaje}", flush=True)
+    if callback:
+        try:
+            callback(etapa_idx, total_etapas, fase, mensaje, estado, detalle or {})
+        except Exception as e:
+            print(f"   [Aviso callback]: {e}", flush=True)
+
+
+# Modelo usado para analizar imágenes (rápido y económico)
+MODELO_VISION = "gemini-3.5-flash-lite"
+MODELO_VISION_FALLBACK = "gemini-3.6-flash"
+
+# Modelos de generación de imagen disponibles en la interfaz
 MODELOS_IMAGEN = {
     "Lite (más barato, ideal para probar)": "gemini-3.1-flash-lite-image",
     "Media (balance calidad/precio)": "gemini-3.1-flash-image",
@@ -51,13 +170,6 @@ MODELOS_IMAGEN = {
 }
 MODELO_IMAGEN_POR_DEFECTO = "Lite (más barato, ideal para probar)"
 
-# Tamaño final del archivo de diseño, pensado para mandar a estampar.
-# 1620x2160 = proporción 3:4 exacta, que es una de las proporciones nativas
-# que soporta la API. IMPORTANTE sobre el costo: entre las opciones de resolución
-# de Gemini, 1K y 2K cuestan exactamente lo mismo -- solo 4K sube el precio.
-# Por eso pedimos 2K (mejor calidad sin pagar más) y al final reescalamos con
-# Pillow al tamaño exacto que necesitas, sin perder nitidez porque la proporción
-# ya calza (no hay que recortar, solo escalar).
 ANCHO_FINAL_PX = 1620
 ALTO_FINAL_PX = 2160
 RELACION_ASPECTO = "3:4"
@@ -69,12 +181,12 @@ DIMENSIONES_POR_PROPORCION = {
     "4:3": (2160, 1620),
 }
 
-# Color chroma exacto usado como fondo cuando no se pide uno sólido específico.
-# Se elige lejos de pieles/telas/paletas de diseño típicas para que el chroma
-# key (quitar_fondo_por_chroma) lo pueda separar de forma limpia y consistente.
 COLOR_CHROMA_DEFECTO = "#00FF7F"
 
-# Reducción de imágenes antes de recortar o procesar para evitar desbordes de memoria RAM.
+# Reducción optimizada:
+# 768px es ideal para análisis de visión (reduce drásticamente tokens de entrada vs imágenes crudas)
+LADO_MAXIMO_VISION = 768
+# 1024px para acondicionamiento y recorte
 LADO_MAXIMO_PARA_RECORTE = 1024
 
 
@@ -91,28 +203,23 @@ def _redimensionar_si_es_muy_grande(imagen: Image.Image, lado_maximo: int = LADO
 
 def extraer_perfil_color(imagenes_referencia: list[Image.Image], cantidad_colores: int = 5) -> dict:
     """
-    Extrae, con matemática real (no con la interpretación de un modelo de IA),
-    los colores dominantes y el nivel de saturación de la(s) referencia(s).
-
-    Usa ColorThief para sacar la paleta dominante de cada imagen, y colorsys
-    para calcular la saturación promedio (en HSV) de esos colores. Con eso
-    clasificamos el "tono" en sobrio / medio / vibrante de forma objetiva,
-    en vez de depender de que Gemini lo describa bien con palabras.
-
-    Devuelve un diccionario con:
-    - "colores_hex": lista de colores dominantes en formato hexadecimal
-    - "saturacion_promedio_pct": número de 0 a 100
-    - "categoria_tono": "sobria/apagada" | "saturación media" | "vibrante/muy saturada"
+    Extrae objetivamente la paleta dominante y saturación promedio sin costo de tokens.
     """
     todos_los_colores = []
     for imagen in imagenes_referencia:
-        img_optimizada = _redimensionar_si_es_muy_grande(imagen, 800)
+        img_optimizada = _redimensionar_si_es_muy_grande(imagen, 400)
         buffer_entrada = io.BytesIO()
         img_optimizada.convert("RGB").save(buffer_entrada, format="PNG")
         buffer_entrada.seek(0)
-        color_thief = ColorThief(buffer_entrada)
-        paleta = color_thief.get_palette(color_count=cantidad_colores, quality=1)
-        todos_los_colores.extend(paleta)
+        try:
+            color_thief = ColorThief(buffer_entrada)
+            paleta = color_thief.get_palette(color_count=cantidad_colores, quality=1)
+            todos_los_colores.extend(paleta)
+        except Exception:
+            pass
+
+    if not todos_los_colores:
+        todos_los_colores = [(255, 255, 255), (0, 0, 0)]
 
     colores_hex = ["#{:02X}{:02X}{:02X}".format(r, g, b) for r, g, b in todos_los_colores]
 
@@ -174,10 +281,14 @@ def analizar_referencias(
     imagenes_referencia: list[Image.Image],
     sujeto_nombre: str = "",
     incluir_colores: bool = False,
-) -> dict:
+    callback_progreso=None,
+    etapa_idx: int = 3,
+    total_etapas: int = 6,
+) -> tuple[dict, dict]:
     """
     Analiza la(s) polera(s) de referencia para adaptar su técnica visual y diagramación
-    al sujeto objetivo (sujeto_nombre), ignorando por completo el tema viejo de la referencia.
+    al sujeto objetivo (sujeto_nombre).
+    Devuelve (datos_analisis, metadatos_tokens).
     """
     instruccion_colores = (
         """
@@ -252,21 +363,42 @@ def analizar_referencias(
         "paleta_referencia_descripcion": "",
     }
 
+    # Redimensionar a max 768px para visión (ahorro masivo de tokens)
+    imagenes_optimizadas_vision = [_redimensionar_si_es_muy_grande(img, LADO_MAXIMO_VISION) for img in imagenes_referencia]
+
+    client = obtener_cliente_gemini()
+    tokens_meta = {"prompt": 0, "candidates": 0, "total": 0}
+
     try:
         respuesta = client.models.generate_content(
             model=MODELO_VISION,
-            contents=[prompt, *imagenes_referencia],
+            contents=[prompt, *imagenes_optimizadas_vision],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
             ),
         )
+        if hasattr(respuesta, "usage_metadata") and respuesta.usage_metadata:
+            tokens_meta["prompt"] = getattr(respuesta.usage_metadata, "prompt_token_count", 0) or 0
+            tokens_meta["candidates"] = getattr(respuesta.usage_metadata, "candidates_token_count", 0) or 0
+            tokens_meta["total"] = getattr(respuesta.usage_metadata, "total_token_count", 0) or 0
+
         data = _parsear_json_seguro(respuesta.text, fallback=fallback_ref)
     except Exception as e:
-        print(f"   Aviso: análisis de referencias con JSON schema falló ({e}), reintentando...")
+        diag, sug = diagnosticar_error_api(e)
+        # Si fue error de cuota o permisos, no quemar reintentos
+        if "429" in str(e) or "quota" in str(e).lower() or "403" in str(e):
+            raise ErrorProcesoPolera(
+                fase="Análisis de Referencias",
+                mensaje=f"Error en Google AI Studio al analizar referencias: {e}",
+                diagnostico=diag,
+                sugerencia=sug,
+                error_original=e,
+            )
+        _notificar_progreso(callback_progreso, etapa_idx, total_etapas, "Análisis de Referencias", f"Aviso: Falló análisis estructurado ({e}), usando modelo fallback...", "warning")
         try:
             respuesta = client.models.generate_content(
-                model=MODELO_VISION,
-                contents=[prompt, *imagenes_referencia],
+                model=MODELO_VISION_FALLBACK,
+                contents=[prompt, *imagenes_optimizadas_vision],
             )
             data = _parsear_json_seguro(respuesta.text, fallback=fallback_ref)
         except Exception:
@@ -280,7 +412,8 @@ def analizar_referencias(
     data["composicion_general"] = _sanitizar_texto_de_referencia(data.get("composicion_general", ""), sujeto_nombre)
     data["estilo_grafico_detalles"] = _sanitizar_texto_de_referencia(data.get("estilo_grafico_detalles", ""), sujeto_nombre)
     data["estilo_subtitulos_y_rotulos"] = _sanitizar_texto_de_referencia(data.get("estilo_subtitulos_y_rotulos", ""), sujeto_nombre)
-    return data
+
+    return data, tokens_meta
 
 
 def analizar_sujeto(
@@ -288,10 +421,13 @@ def analizar_sujeto(
     titulo: str,
     descripcion_usuario: str,
     frases_sueltas: list[str],
-) -> dict:
+    callback_progreso=None,
+    etapa_idx: int = 2,
+    total_etapas: int = 6,
+) -> tuple[dict, dict]:
     """
-    Analiza las fotos que el usuario subió como sujeto (plantas, personas, animales, autos, etc.)
-    y extrae qué es, sus rasgos clave y una lista de variaciones coherentes para poblar el diseño.
+    Analiza las fotos del sujeto con visión económica de Gemini.
+    Devuelve (datos_sujeto, metadatos_tokens).
     """
     frases_str = ", ".join(frases_sueltas) if frases_sueltas else "ninguna"
     pista_sujeto = f"Descripción del usuario: '{descripcion_usuario}'" if descripcion_usuario else ""
@@ -335,39 +471,45 @@ def analizar_sujeto(
         ],
     }
 
+    # Redimensionar fotos a max 768px para visión (ahorro de tokens y memoria)
+    imagenes_optimizadas_vision = [_redimensionar_si_es_muy_grande(img, LADO_MAXIMO_VISION) for img in imagenes_sujeto]
+
+    client = obtener_cliente_gemini()
+    tokens_meta = {"prompt": 0, "candidates": 0, "total": 0}
+
     try:
         respuesta = client.models.generate_content(
             model=MODELO_VISION,
-            contents=[prompt, *imagenes_sujeto],
+            contents=[prompt, *imagenes_optimizadas_vision],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
             ),
         )
-        return _parsear_json_seguro(respuesta.text, fallback=fallback_sujeto)
+        if hasattr(respuesta, "usage_metadata") and respuesta.usage_metadata:
+            tokens_meta["prompt"] = getattr(respuesta.usage_metadata, "prompt_token_count", 0) or 0
+            tokens_meta["candidates"] = getattr(respuesta.usage_metadata, "candidates_token_count", 0) or 0
+            tokens_meta["total"] = getattr(respuesta.usage_metadata, "total_token_count", 0) or 0
+
+        return _parsear_json_seguro(respuesta.text, fallback=fallback_sujeto), tokens_meta
     except Exception as e:
-        print(f"   Aviso: análisis de sujeto falló ({e}), usando fallback...")
-        return fallback_sujeto
+        diag, sug = diagnosticar_error_api(e)
+        if "429" in str(e) or "quota" in str(e).lower() or "403" in str(e):
+            raise ErrorProcesoPolera(
+                fase="Análisis de Sujeto",
+                mensaje=f"Error en Google AI Studio al analizar el sujeto: {e}",
+                diagnostico=diag,
+                sugerencia=sug,
+                error_original=e,
+            )
+        _notificar_progreso(callback_progreso, etapa_idx, total_etapas, "Análisis de Sujeto", f"Aviso: Análisis falló ({e}), usando descripción proporcionada...", "warning")
+        return fallback_sujeto, tokens_meta
 
 
 def quitar_fondo_por_chroma(
     imagen: Image.Image, color_chroma_hex: str, tolerancia: float = 60.0, suavizado: float = 40.0
 ) -> Image.Image:
     """
-    Post-proceso para el diseño YA GENERADO por Gemini: como le pedimos un fondo
-    de un color EXACTO y conocido (color_chroma_hex), no tiene sentido usar un
-    modelo de IA (rembg) para "adivinar" qué es fondo y qué no -- eso es lo que
-    estaba causando el problema de fondo inconsistente (aparecía en algunas
-    zonas y en otras no), porque el modelo de segmentación de rembg está
-    entrenado para fotos naturales, no para diseños gráficos con fondo plano.
-
-    En vez de eso, esto es un chroma key clásico (la misma técnica de pantalla
-    verde de cine): se mide qué tan cerca está cada pixel del color de fondo
-    exacto, y se vuelve transparente todo lo que esté suficientemente cerca.
-    Esto es determinístico -- si el fondo es parejo (que es lo que le pedimos
-    a Gemini), el resultado también lo es, sin parches ni sorpresas.
-
-    tolerancia: qué tan lejos del color exacto todavía se considera "fondo".
-    suavizado: ancho de la transición (para que el borde no quede 100% duro).
+    Chroma key determinístico local: separa el fondo plano exacto sin IA ni costo de API.
     """
     import numpy as np
     from PIL import ImageFilter
@@ -382,9 +524,6 @@ def quitar_fondo_por_chroma(
     )
 
     distancia = np.sqrt(((arreglo - color_objetivo) ** 2).sum(axis=2))
-
-    # Debajo de "tolerancia" -> transparente (alpha 0); por encima de
-    # tolerancia+suavizado -> opaco (alpha 255); en el medio, transición lineal.
     alpha = np.clip((distancia - tolerancia) / suavizado, 0, 1) * 255
     canal_alpha = Image.fromarray(alpha.astype("uint8"), mode="L")
     canal_alpha = canal_alpha.filter(ImageFilter.GaussianBlur(radius=1))
@@ -405,7 +544,7 @@ def generar_diseno_desde_imagenes(
     modelo_imagen: str = MODELOS_IMAGEN[MODELO_IMAGEN_POR_DEFECTO],
     color_fondo_solido: str | None = None,
     descripcion_sujeto: str = "",
-    tipo_sujeto: str = "Auto-detectar",
+    tipo_sujeto: str = "Auto-detectar con IA",
     pose_personalizada: str = "",
     encuadre: str = "Auto",
     expresion: str = "Auto",
@@ -419,26 +558,172 @@ def generar_diseno_desde_imagenes(
     elementos_a_evitar: str = "",
     proporcion_estampado: str = "3:4",
     nivel_estilizacion: str = "Transformación artística total (Recomendado: máxima fidelidad de estilo)",
+    callback_progreso=None,
+    cache_analisis: dict | None = None,
+    modo_ahorro_tokens: bool = False,
 ) -> Image.Image:
     """
     Genera el diseño completo combinando la plantilla abstracta de la referencia
-    con el sujeto real que el usuario subió (personas, plantas, animales, autos, etc.)
-    y las preferencias explícitas opcionales de diseño y pose.
+    con el sujeto real del usuario.
+    
+    Incluye:
+    - Callback de progreso y logging en tiempo real para la consola Streamlit.
+    - Manejo de excepciones detallado (ErrorProcesoPolera).
+    - Caché inteligente de análisis para 0 consumo de tokens en repeticiones.
+    - Medición exacta de tokens y costo de Google AI Studio.
     """
-    print("1/5 Analizando sujeto(s) a ilustrar...")
-    analisis_sujeto = analizar_sujeto(imagenes_personaje, titulo, descripcion_sujeto, frases_sueltas)
+    total_etapas = 6
+    tiempo_inicio_global = time.time()
+    
+    registro_tokens = {
+        "analisis_sujeto": {"prompt": 0, "candidates": 0, "total": 0, "desde_cache": False},
+        "analisis_referencias": {"prompt": 0, "candidates": 0, "total": 0, "desde_cache": False},
+        "generacion_imagen": {"prompt": 0, "candidates": 0, "total": 0},
+        "total_tokens": 0,
+    }
+
+    # =========================================================================
+    # ETAPA 1: Validación Previa
+    # =========================================================================
+    _notificar_progreso(callback_progreso, 1, total_etapas, "Validación previa", "Verificando credenciales, imágenes y parámetros...", "running")
+    
+    if not imagenes_referencia or not imagenes_personaje:
+        raise ErrorProcesoPolera(
+            fase="Validación Previa",
+            mensaje="Faltan imágenes requeridas.",
+            diagnostico="Se requiere al menos una imagen de referencia y al menos una foto del sujeto.",
+            sugerencia="Sube al menos un archivo en el paso 1 y en el paso 2 de la interfaz.",
+        )
+
+    if not titulo or not titulo.strip():
+        raise ErrorProcesoPolera(
+            fase="Validación Previa",
+            mensaje="El título principal está vacío.",
+            diagnostico="El diseño necesita al menos un título para la tipografía central.",
+            sugerencia="Escribe un título en el campo de texto (Paso 4).",
+        )
+
+    client = obtener_cliente_gemini()
+    _notificar_progreso(callback_progreso, 1, total_etapas, "Validación previa", "Imágenes y credenciales verificadas correctamente.", "success")
+
+    # =========================================================================
+    # ETAPA 2: Análisis del Sujeto (con Caché y Modo Ahorro)
+    # =========================================================================
+    t0 = time.time()
+    analisis_sujeto = None
+
+    # Verificar si está en caché
+    if cache_analisis and "analisis_sujeto" in cache_analisis:
+        analisis_sujeto = cache_analisis["analisis_sujeto"]
+        registro_tokens["analisis_sujeto"]["desde_cache"] = True
+        _notificar_progreso(
+            callback_progreso, 2, total_etapas, "Análisis de Sujeto",
+            f"⚡ [Caché Activa] Sujeto reutilizado ({analisis_sujeto.get('nombre_exacto_sujeto')}). ¡0 tokens consumidos!",
+            "success",
+        )
+    elif modo_ahorro_tokens and descripcion_sujeto.strip() and tipo_sujeto != "Auto-detectar con IA":
+        # Modo ahorro: omitir llamada a visión si el usuario ya explicó qué es
+        analisis_sujeto = {
+            "categoria_sujeto": tipo_sujeto,
+            "nombre_exacto_sujeto": descripcion_sujeto.strip(),
+            "descripcion_visual_detallada": f"{tipo_sujeto}: {descripcion_sujeto.strip()}",
+            "variaciones_visuales": [
+                f"Vista principal de {descripcion_sujeto.strip()}",
+                f"Detalle en primer plano de {descripcion_sujeto.strip()}",
+                f"Ángulo dinámico de {descripcion_sujeto.strip()}",
+                f"Composición secundaria de {descripcion_sujeto.strip()}",
+            ],
+        }
+        registro_tokens["analisis_sujeto"]["desde_cache"] = True
+        _notificar_progreso(
+            callback_progreso, 2, total_etapas, "Análisis de Sujeto",
+            f"⚡ [Modo Ahorro] Omitida llamada a IA de visión. Usando descripción directa ({descripcion_sujeto.strip()}). ¡0 tokens!",
+            "success",
+        )
+    else:
+        _notificar_progreso(callback_progreso, 2, total_etapas, "Análisis de Sujeto", "Analizando taxonomía y rasgos visuales del sujeto con Gemini Vision...", "running")
+        try:
+            analisis_sujeto, tokens_suj = analizar_sujeto(
+                imagenes_sujeto=imagenes_personaje,
+                titulo=titulo,
+                descripcion_usuario=descripcion_sujeto,
+                frases_sueltas=frases_sueltas,
+                callback_progreso=callback_progreso,
+                etapa_idx=2,
+                total_etapas=total_etapas,
+            )
+            registro_tokens["analisis_sujeto"] = tokens_suj
+            dt = round(time.time() - t0, 1)
+            _notificar_progreso(
+                callback_progreso, 2, total_etapas, "Análisis de Sujeto",
+                f"Sujeto identificado: '{analisis_sujeto.get('nombre_exacto_sujeto')}' ({dt}s, {tokens_suj.get('total', 0)} tokens).",
+                "success",
+            )
+        except Exception as e:
+            if isinstance(e, ErrorProcesoPolera):
+                raise
+            diag, sug = diagnosticar_error_api(e)
+            raise ErrorProcesoPolera(
+                fase="Análisis de Sujeto",
+                mensaje=f"Fallo al analizar las fotos del sujeto: {e}",
+                diagnostico=diag,
+                sugerencia=sug,
+                error_original=e,
+            )
+
     sujeto_nombre = descripcion_sujeto.strip() if descripcion_sujeto.strip() else analisis_sujeto.get("nombre_exacto_sujeto", titulo or "Sujeto adjunto")
     sujeto_desc = analisis_sujeto.get("descripcion_visual_detallada", "")
     sujeto_cat = analisis_sujeto.get("categoria_sujeto", "objeto_otro")
     variaciones = analisis_sujeto.get("variaciones_visuales", [])
 
-    print("2/5 Analizando referencia(s) (adaptando plantilla y estilo al sujeto)...")
-    analisis_ref = analizar_referencias(imagenes_referencia, sujeto_nombre=sujeto_nombre, incluir_colores=usar_colores_referencia)
-    perfil_color = extraer_perfil_color(imagenes_referencia)
+    # =========================================================================
+    # ETAPA 3: Análisis de Referencias y Paleta (con Caché)
+    # =========================================================================
+    t0 = time.time()
+    analisis_ref = None
+    perfil_color = None
+
+    if cache_analisis and "analisis_ref" in cache_analisis and "perfil_color" in cache_analisis:
+        analisis_ref = cache_analisis["analisis_ref"]
+        perfil_color = cache_analisis["perfil_color"]
+        registro_tokens["analisis_referencias"]["desde_cache"] = True
+        _notificar_progreso(
+            callback_progreso, 3, total_etapas, "Análisis de Referencias",
+            f"⚡ [Caché Activa] Estructura y paleta reutilizadas ({analisis_ref.get('tipo_layout')}). ¡0 tokens consumidos!",
+            "success",
+        )
+    else:
+        _notificar_progreso(callback_progreso, 3, total_etapas, "Análisis de Referencias", "Extrayendo técnica visual, diagramación y paleta de la polera de referencia...", "running")
+        try:
+            analisis_ref, tokens_ref = analizar_referencias(
+                imagenes_referencia=imagenes_referencia,
+                sujeto_nombre=sujeto_nombre,
+                incluir_colores=usar_colores_referencia,
+                callback_progreso=callback_progreso,
+                etapa_idx=3,
+                total_etapas=total_etapas,
+            )
+            perfil_color = extraer_perfil_color(imagenes_referencia)
+            registro_tokens["analisis_referencias"] = tokens_ref
+            dt = round(time.time() - t0, 1)
+            _notificar_progreso(
+                callback_progreso, 3, total_etapas, "Análisis de Referencias",
+                f"Plantilla: {analisis_ref.get('tipo_layout')} | Saturación: {perfil_color['saturacion_promedio_pct']}% ({dt}s, {tokens_ref.get('total', 0)} tokens).",
+                "success",
+            )
+        except Exception as e:
+            if isinstance(e, ErrorProcesoPolera):
+                raise
+            diag, sug = diagnosticar_error_api(e)
+            raise ErrorProcesoPolera(
+                fase="Análisis de Referencias",
+                mensaje=f"Fallo al analizar la referencia de diseño: {e}",
+                diagnostico=diag,
+                sugerencia=sug,
+                error_original=e,
+            )
 
     cant_elementos = max(1, int(analisis_ref.get("cantidad_elementos_en_layout", len(analisis_ref.get("distribucion_elementos", [])) or 1)))
-    
-    # Sobrescritura de cantidad de elementos si el usuario especificó una distribución manual
     if distribucion_figuras and not distribucion_figuras.startswith("Auto"):
         if "1 sola figura" in distribucion_figuras:
             cant_elementos = 1
@@ -449,46 +734,59 @@ def generar_diseno_desde_imagenes(
         elif "Cuadrícula / Catálogo" in distribucion_figuras:
             cant_elementos = max(cant_elementos, 6)
 
-    medio_tec = analisis_ref.get("medio_y_tecnica", "Gráfica de polera")
-    layout_tipo = analisis_ref.get("tipo_layout", "layout")
-
-    print(
-        f"   Sujeto identificado: {sujeto_nombre} ({sujeto_cat}) | "
-        f"Plantilla: {layout_tipo} con {cant_elementos} elemento(s) | "
-        f"Técnica: {medio_tec[:30]}... | "
-        f"Saturación: {perfil_color['saturacion_promedio_pct']}% ({perfil_color['categoria_tono']})"
-    )
+    # =========================================================================
+    # ETAPA 4: Procesamiento y Recorte de Fondo del Personaje (Local, Gratis)
+    # =========================================================================
+    t0 = time.time()
+    imagenes_personaje_final = []
 
     if recortar_personaje:
-        print(f"   Recortando fondo de {len(imagenes_personaje)} imagen(es) de sujeto...")
-        from rembg import remove
-        imagenes_personaje_final = []
-        for img in imagenes_personaje:
-            img_reducida = _redimensionar_si_es_muy_grande(img, 1024)
-            buffer_entrada = io.BytesIO()
-            img_reducida.save(buffer_entrada, format="PNG")
-            try:
-                # Se utiliza rembg directamente sin alpha_matting (alpha_matting intenta alocar
-                # matrices scipy/numpy gigantescas de más de 2 GiB causando MemoryError en Windows)
-                resultado = remove(buffer_entrada.getvalue())
-                imagenes_personaje_final.append(Image.open(io.BytesIO(resultado)))
-            except Exception as err_rem:
-                print(f"   Aviso: fallo al recortar fondo del sujeto ({err_rem}), usando imagen directa...")
-                imagenes_personaje_final.append(img_reducida)
+        _notificar_progreso(
+            callback_progreso, 4, total_etapas, "Recorte de Sujeto",
+            f"Recortando fondo de {len(imagenes_personaje)} imagen(es) de forma local (sin coste de tokens)...",
+            "running",
+        )
+        try:
+            from rembg import remove
+            for idx, img in enumerate(imagenes_personaje):
+                img_reducida = _redimensionar_si_es_muy_grande(img, LADO_MAXIMO_PARA_RECORTE)
+                buffer_entrada = io.BytesIO()
+                img_reducida.save(buffer_entrada, format="PNG")
+                try:
+                    resultado_recorte = remove(buffer_entrada.getvalue())
+                    imagenes_personaje_final.append(Image.open(io.BytesIO(resultado_recorte)))
+                except Exception as err_rem:
+                    _notificar_progreso(
+                        callback_progreso, 4, total_etapas, "Recorte de Sujeto",
+                        f"Aviso en recorte #{idx+1} ({err_rem}), usando imagen sin recortar para evitar detención...",
+                        "warning",
+                    )
+                    imagenes_personaje_final.append(img_reducida)
+            dt = round(time.time() - t0, 1)
+            _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", f"Recorte completado exitosamente ({dt}s).", "success")
+        except Exception as e:
+            _notificar_progreso(
+                callback_progreso, 4, total_etapas, "Recorte de Sujeto",
+                f"Aviso: librería rembg no disponible o con poca RAM ({e}). Continuando con imágenes directas...",
+                "warning",
+            )
+            imagenes_personaje_final = [_redimensionar_si_es_muy_grande(img, LADO_MAXIMO_PARA_RECORTE) for img in imagenes_personaje]
     else:
-        imagenes_personaje_final = [_redimensionar_si_es_muy_grande(img, 1024) for img in imagenes_personaje]
+        _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", "Se conservan fondos originales según configuración elegida.", "info")
+        imagenes_personaje_final = [_redimensionar_si_es_muy_grande(img, LADO_MAXIMO_PARA_RECORTE) for img in imagenes_personaje]
 
-    print("3/5 Armando prompt final estructurado...")
+    # =========================================================================
+    # ETAPA 5: Construcción de Prompt y Generación de Imagen Final (Gemini)
+    # =========================================================================
+    _notificar_progreso(callback_progreso, 5, total_etapas, "Generación con IA", "Sintetizando especificación maestra y enviando solicitud a Gemini...", "running")
     
-    # 1. Asignación de elementos/especímenes del sujeto a la cuadrícula
+    # 1. Asignación de elementos a la cuadrícula
     distribucion = analisis_ref.get("distribucion_elementos", [])
     lineas_elementos = []
     for i in range(cant_elementos):
         var_texto = variaciones[i % len(variaciones)] if variaciones else f"Variación #{i+1} de {sujeto_nombre}"
         pos_info = distribucion[i].get("posicion", f"Posición #{i+1}") if i < len(distribucion) else f"Posición #{i+1}"
-        lineas_elementos.append(
-            f"  * Elemento {i+1} ({pos_info}): {var_texto} (de {sujeto_nombre})."
-        )
+        lineas_elementos.append(f"  * Elemento {i+1} ({pos_info}): {var_texto} (de {sujeto_nombre}).")
     instrucciones_elementos_texto = "\n".join(lineas_elementos)
 
     # 2. Tipografía y textos
@@ -531,7 +829,6 @@ def generar_diseno_desde_imagenes(
             "Ningún elemento de las ilustraciones ni del texto debe usar este mismo verde)."
         )
 
-    # Construcción de directrices opcionales del usuario
     directrices_usuario = []
     if pose_personalizada and pose_personalizada.strip():
         directrices_usuario.append(f"- POSE Y ACCIÓN OBLIGATORIA DEL SUJETO: {pose_personalizada.strip()}")
@@ -554,7 +851,6 @@ def generar_diseno_desde_imagenes(
     if instrucciones_extra and instrucciones_extra.strip():
         directrices_usuario.append(f"- INSTRUCCIONES ESPECÍFICAS ADICIONALES: {instrucciones_extra.strip()}")
 
-    # Directiva de estilización y fidelidad de estilo
     if "total" in nivel_estilizacion.lower():
         directrices_usuario.append(
             "- DIRECTIVA DE ESTILIZACIÓN (TRANSFORMACIÓN ARTÍSTICA TOTAL): Dibuja al sujeto completamente desde cero "
@@ -641,7 +937,6 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 - RESTRICCIÓN DE SALIDA: Genera EXCLUSIVAMENTE el archivo de arte gráfico 2D plano, de frente, ocupando el lienzo completo. PROHIBIDO generar mockups de poleras, personas vistiendo ropa, pliegues de tela o fondos de estudio.
 """
 
-    # Resolver proporción y resolución final
     ratio_str = "3:4"
     for r in ["1:1", "9:16", "4:3", "3:4"]:
         if proporcion_estampado.startswith(r):
@@ -650,12 +945,9 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 
     ancho_px, alto_px = DIMENSIONES_POR_PROPORCION.get(ratio_str, (ANCHO_FINAL_PX, ALTO_FINAL_PX))
 
-    print(f"4/5 Generando diseño (modelo: {modelo_imagen}, proporción {ratio_str}, multimodal directo)...")
-    
-    # Preparar imágenes de referencia optimizadas para acondicionamiento multimodal directo (máx 1024px)
-    imagenes_ref_optimizadas = [
-        _redimensionar_si_es_muy_grande(img, 1024) for img in imagenes_referencia
-    ]
+    # Optimización de referencias para la llamada multimodal:
+    # Se toman máximo las 2 referencias principales a 1024px para evitar desbordar tokens de entrada en el modelo de imagen
+    imagenes_ref_optimizadas = [_redimensionar_si_es_muy_grande(img, 1024) for img in imagenes_referencia[:2]]
 
     contenidos_multimodales = [
         "### [REFERENCIA(S) VISUAL(ES) DE ESTILO, TÉCNICA Y DIAGRAMACIÓN]:\n"
@@ -668,53 +960,175 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
         f"\n### [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO]:\n{prompt_final}",
     ]
 
-    respuesta_imagen = client.models.generate_content(
-        model=modelo_imagen,
-        contents=contenidos_multimodales,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(
-                aspect_ratio=ratio_str,
-            ),
-        ),
+    _notificar_progreso(
+        callback_progreso, 5, total_etapas, "Generación con IA",
+        f"Esperando respuesta del modelo de imagen '{modelo_imagen}' ({ratio_str})...",
+        "running",
     )
 
+    t0_imagen = time.time()
+    try:
+        respuesta_imagen = client.models.generate_content(
+            model=modelo_imagen,
+            contents=contenidos_multimodales,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio=ratio_str,
+                ),
+            ),
+        )
+    except Exception as e:
+        diag, sug = diagnosticar_error_api(e)
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje=f"Error en la llamada a la API de Imagen: {e}",
+            diagnostico=diag,
+            sugerencia=sug,
+            error_original=e,
+            tokens_gastados=registro_tokens,
+        )
+
+    # Registro de tokens de imagen si están disponibles
+    if hasattr(respuesta_imagen, "usage_metadata") and respuesta_imagen.usage_metadata:
+        registro_tokens["generacion_imagen"]["prompt"] = getattr(respuesta_imagen.usage_metadata, "prompt_token_count", 0) or 0
+        registro_tokens["generacion_imagen"]["candidates"] = getattr(respuesta_imagen.usage_metadata, "candidates_token_count", 0) or 0
+        registro_tokens["generacion_imagen"]["total"] = getattr(respuesta_imagen.usage_metadata, "total_token_count", 0) or 0
+
+    # Inspección forense de la respuesta (seguridad, rechazos o falta de imagen)
+    if hasattr(respuesta_imagen, "prompt_feedback") and respuesta_imagen.prompt_feedback:
+        fb = respuesta_imagen.prompt_feedback
+        if getattr(fb, "block_reason", None):
+            raise ErrorProcesoPolera(
+                fase="Generación con IA (Modelo de Imagen)",
+                mensaje=f"Google bloqueó la solicitud por política de contenido: {fb.block_reason}",
+                diagnostico="El prompt o alguna de las fotos de entrada activó un filtro de seguridad antes de procesar.",
+                sugerencia="Modifica el título, evita mencionar figuras públicas o nombres de marcas comerciales.",
+                detalle_tecnico=str(fb),
+                tokens_gastados=registro_tokens,
+            )
+
+    candidatos = getattr(respuesta_imagen, "candidates", None)
+    if not candidatos or len(candidatos) == 0:
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje="Gemini no devolvió ningún candidato de respuesta.",
+            diagnostico="La API de Google terminó la petición sin devolver candidatos de imagen.",
+            sugerencia="Verifica tu cuota de facturación en Google AI Studio o prueba seleccionando el modelo 'Lite'.",
+            detalle_tecnico=str(respuesta_imagen),
+            tokens_gastados=registro_tokens,
+        )
+
+    candidato = candidatos[0]
+    finish_reason = getattr(candidato, "finish_reason", None)
+    finish_reason_str = str(finish_reason).upper() if finish_reason else ""
+
+    if finish_reason and "STOP" not in finish_reason_str:
+        diagnostico = f"La generación se detuvo por el motivo: {finish_reason}"
+        sugerencia = "Modifica los textos o fotos para evitar bloqueos por políticas de IA."
+        if "SAFETY" in finish_reason_str:
+            ratings = getattr(candidato, "safety_ratings", [])
+            ratings_str = ", ".join([f"{r.category}: {r.probability}" for r in ratings if getattr(r, 'probability', None)])
+            diagnostico = f"Bloqueado por filtros de seguridad de Gemini ({ratings_str or 'SAFETY'})."
+            sugerencia = "La IA detectó contenido sensible, posibles derechos de autor o parecido a personas protegidas. Prueba cambiando el título o usando otra imagen del sujeto."
+        elif "RECITATION" in finish_reason_str:
+            diagnostico = "Bloqueado por posible reproducción no autorizada de material protegido (RECITATION)."
+            sugerencia = "Evita textos o marcas registradas en el título o frases secundarias."
+
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje=f"Generación rechazada por la IA (Motivo: {finish_reason})",
+            diagnostico=diagnostico,
+            sugerencia=sugerencia,
+            detalle_tecnico=f"finish_reason={finish_reason}, safety_ratings={getattr(candidato, 'safety_ratings', 'N/A')}",
+            tokens_gastados=registro_tokens,
+        )
+
+    # Extraer la imagen de las partes
     imagen_base = None
-    for parte in respuesta_imagen.candidates[0].content.parts:
-        if parte.inline_data is not None:
-            imagen_base = Image.open(io.BytesIO(parte.inline_data.data))
-            break
+    texto_respuesta = ""
+    if hasattr(candidato, "content") and candidato.content and hasattr(candidato.content, "parts"):
+        for parte in candidato.content.parts:
+            if getattr(parte, "inline_data", None) is not None:
+                imagen_base = Image.open(io.BytesIO(parte.inline_data.data))
+                break
+            elif getattr(parte, "text", None):
+                texto_respuesta += parte.text
 
     if imagen_base is None:
-        raise RuntimeError("Gemini no devolvió ninguna imagen. Revisa: " + str(respuesta_imagen))
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje="Gemini no devolvió datos de imagen en su respuesta.",
+            diagnostico=f"El modelo respondió solo con texto: '{texto_respuesta}'" if texto_respuesta else "No se recibieron bytes de imagen válidos.",
+            sugerencia="Prueba con otra proporción o revisa si el modelo seleccionado está disponible.",
+            detalle_tecnico=str(candidato),
+            tokens_gastados=registro_tokens,
+        )
 
-    if color_fondo_solido:
-        print("5/5 Fondo sólido pedido explícitamente -> no se quita, se deja tal cual.")
-        imagen_resultado = imagen_base
-    else:
-        print("5/5 Quitando fondo por chroma key exacto (determinístico, no IA)...")
-        imagen_resultado = quitar_fondo_por_chroma(imagen_base, COLOR_CHROMA_DEFECTO)
+    dt_img = round(time.time() - t0_imagen, 1)
+    _notificar_progreso(callback_progreso, 5, total_etapas, "Generación con IA", f"Imagen generada exitosamente en {dt_img}s.", "success")
 
-    imagen_resultado = imagen_resultado.resize(
-        (ancho_px, alto_px), Image.LANCZOS
+    # =========================================================================
+    # ETAPA 6: Postprocesamiento y Acabado Chroma
+    # =========================================================================
+    _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", "Aplicando recorte de fondo y reescalando a resolución final...", "running")
+    
+    t0_post = time.time()
+    try:
+        if color_fondo_solido:
+            imagen_resultado = imagen_base
+            _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", "Fondo sólido conservado.", "info")
+        else:
+            imagen_resultado = quitar_fondo_por_chroma(imagen_base, COLOR_CHROMA_DEFECTO)
+            _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", "Fondo transparente aplicado vía chroma key.", "info")
+
+        imagen_resultado = imagen_resultado.resize((ancho_px, alto_px), Image.LANCZOS)
+    except Exception as e:
+        raise ErrorProcesoPolera(
+            fase="Postprocesamiento y Recorte",
+            mensaje=f"Error al procesar la imagen generada: {e}",
+            diagnostico="Fallo al aplicar la transparencia o redimensionar la imagen final.",
+            sugerencia="Revisa los recursos de memoria del servidor.",
+            error_original=e,
+            tokens_gastados=registro_tokens,
+        )
+
+    # Calcular totales de tokens
+    total_tokens = sum(
+        registro_tokens[k].get("total", 0) for k in ["analisis_sujeto", "analisis_referencias", "generacion_imagen"]
     )
+    registro_tokens["total_tokens"] = total_tokens
+    tiempo_total = round(time.time() - tiempo_inicio_global, 1)
+
+    # Adjuntar metadatos al resultado para que la interfaz los consuma
     imagen_resultado.info["prompt_final"] = prompt_final
+    imagen_resultado.info["registro_tokens"] = registro_tokens
+    imagen_resultado.info["tiempo_total_segundos"] = tiempo_total
+    imagen_resultado.info["cache_generada"] = {
+        "analisis_sujeto": analisis_sujeto,
+        "analisis_ref": analisis_ref,
+        "perfil_color": perfil_color,
+    }
+
+    _notificar_progreso(
+        callback_progreso, 6, total_etapas, "Postprocesamiento",
+        f"¡Diseño completado en {tiempo_total}s! (Tokens totales: {total_tokens:,})",
+        "success",
+        detalle={"tokens": registro_tokens, "tiempo": tiempo_total},
+    )
 
     return imagen_resultado
 
 
 if __name__ == "__main__":
-    # ---- EDITA ESTOS VALORES PARA TU PRUEBA POR LÍNEA DE COMANDOS ----
-    # (si prefieres la interfaz visual, corre "python -m streamlit run app_visual.py")
     if not os.path.exists("referencia.jpg") or not os.path.exists("personaje.jpg"):
         print("\n[INFO] No se encontraron los archivos 'referencia.jpg' y/o 'personaje.jpg' en la carpeta.")
         print("       Si prefieres usar la interfaz visual (recomendado), ejecuta:")
         print("       python -m streamlit run app_visual.py\n")
-        print("       O coloca 'referencia.jpg' y 'personaje.jpg' en esta carpeta para probar por consola.\n")
         sys.exit(0)
 
-    referencias = [Image.open("referencia.jpg")]  # agrega más rutas a la lista si quieres varias
-    personajes = [Image.open("personaje.jpg")]     # ídem para varias fotos del personaje
+    referencias = [Image.open("referencia.jpg")]
+    personajes = [Image.open("personaje.jpg")]
 
     imagen_final = generar_diseno_desde_imagenes(
         imagenes_referencia=referencias,
