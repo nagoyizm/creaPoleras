@@ -4,7 +4,8 @@ FROM python:3.11-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    U2NET_HOME=/root/.u2net
+    U2NET_HOME=/root/.u2net \
+    REMBG_MODELO=u2net
 
 # Instalar dependencias del sistema requeridas para Pillow, OpenCV y rembg
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,7 +23,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Pre-descargar modelo u2net de rembg durante el build para evitar descargas en tiempo de ejecución en Contabo
-RUN python -c "import rembg; from PIL import Image; rembg.remove(Image.new('RGB', (512, 512)))"
+RUN python -c "import rembg; from PIL import Image; rembg.remove(Image.new('RGB', (512, 512)), session=rembg.new_session('u2net'))"
 
 # Fuentes para el texto local de la mesa de composicion (despues de rembg para conservar la cache)
 RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \

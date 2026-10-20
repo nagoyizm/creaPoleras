@@ -549,13 +549,28 @@ def quitar_fondo_por_chroma(
     return Image.merge("RGBA", (r, g, b, canal_alpha))
 
 
+_SESION_REMBG = None
+
+
+def _quitar_fondo_rembg(datos: bytes) -> bytes:
+    """rembg con el modelo de REMBG_MODELO si esta definido (ej. u2net en el servidor, liviano);
+    si no, usa el modelo por defecto de la libreria."""
+    from rembg import remove, new_session
+    global _SESION_REMBG
+    modelo = os.environ.get("REMBG_MODELO", "").strip()
+    if not modelo:
+        return remove(datos)
+    if _SESION_REMBG is None:
+        _SESION_REMBG = new_session(modelo)
+    return remove(datos, session=_SESION_REMBG)
+
+
 def recortar_sujeto(imagen: Image.Image) -> Image.Image:
     """Quita el fondo de una foto con rembg (local, gratis). Devuelve RGBA. Lanza excepción si falla."""
-    from rembg import remove
     reducida = _redimensionar_si_es_muy_grande(imagen, LADO_MAXIMO_PARA_RECORTE)
     buffer = io.BytesIO()
     reducida.save(buffer, format="PNG")
-    return Image.open(io.BytesIO(remove(buffer.getvalue()))).convert("RGBA")
+    return Image.open(io.BytesIO(_quitar_fondo_rembg(buffer.getvalue()))).convert("RGBA")
 
 
 def _aplanar_sobre_color(imagen: Image.Image, color_hex: str = "#808080") -> Image.Image:
@@ -1002,13 +1017,12 @@ def generar_diseno_desde_imagenes(
             "running",
         )
         try:
-            from rembg import remove
             for idx, img in enumerate(imagenes_personaje):
                 img_reducida = _redimensionar_si_es_muy_grande(img, LADO_MAXIMO_PARA_RECORTE)
                 buffer_entrada = io.BytesIO()
                 img_reducida.save(buffer_entrada, format="PNG")
                 try:
-                    resultado_recorte = remove(buffer_entrada.getvalue())
+                    resultado_recorte = _quitar_fondo_rembg(buffer_entrada.getvalue())
                     imagenes_personaje_final.append(Image.open(io.BytesIO(resultado_recorte)))
                 except Exception as err_rem:
                     _notificar_progreso(
