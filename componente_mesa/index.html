@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesa de composición</title>
+<style>
+  :root { --fg:#31333f; --bg2:#f0f2f6; --accent:#2b7fff; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--fg);
+    font:13px/1.4 "Source Sans Pro", system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #barra { display:flex; flex-wrap:wrap; gap:6px 8px; align-items:center; padding:2px 0 8px; }
+  button { background:var(--bg2); color:var(--fg); border:1px solid rgba(128,128,128,.35);
+    border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  label { display:flex; align-items:center; gap:6px; }
+  input[type=range] { width:110px; accent-color:var(--accent); }
+  #sel { opacity:.75; margin-left:auto; max-width:40%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #capas { display:flex; flex-wrap:wrap; gap:4px; padding:0 0 8px; }
+  #capas button { padding:2px 8px; font-size:12px; }
+  #capas button.on { border-color:var(--accent); color:var(--accent); background:transparent; font-weight:600; }
+  #wrap { display:flex; justify-content:center; }
+  #stage { outline:none; border:1px solid rgba(128,128,128,.45); line-height:0; }
+  #ayuda { opacity:.65; padding-top:6px; font-size:12px; }
+</style>
+<script src="konva.min.js"></script>
+</head>
+<body>
+<div id="barra">
+  <label>Referencia al fondo <input id="op" type="range" min="0" max="100" value="30"></label>
+  <button id="bFrente" disabled>Al frente</button>
+  <button id="bAtras" disabled>Atrás</button>
+  <button id="bProp" disabled title="Devuelve la imagen a su proporción original">Proporción original</button>
+  <button id="bDup" disabled>Duplicar</button>
+  <button id="bDel" disabled>Quitar</button>
+  <span id="sel"></span>
+</div>
+<div id="capas" title="Selecciona cualquier capa, aunque esté tapada por otra"></div>
+<div id="wrap"><div id="stage" tabindex="0"></div></div>
+<div id="ayuda">Arrastra para mover · esquinas escalan en proporción, bordes estiran · punto superior para rotar · lista de capas para elegir una tapada · flechas para ajuste fino (Mayús = más rápido) · Supr para quitar</div>
+
+<script>
+// ---- Protocolo mínimo de componente Streamlit (sin build, sin npm) ----
+const enviar = (type, data) => window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data), "*");
+const setValor = (value) => enviar("streamlit:setComponentValue", { value, dataType: "json" });
+const setAlto = () => enviar("streamlit:setFrameHeight", { height: Math.ceil(document.body.getBoundingClientRect().height) + 6 });
+
+let stage, capaFondo, capaMain, tr, nodoRef, W = 0, H = 0;
+let firmaActual = null, tokenBuild = 0, contadorDup = 0;
+const cacheImg = {};
+
+const $ = (id) => document.getElementById(id);
+
+function cargar(src) {
+  if (cacheImg[src]) return cacheImg[src];
+  cacheImg[src] = new Promise((ok, err) => { const i = new Image(); i.onload = () => ok(i); i.onerror = err; i.src = src; });
+  return cacheImg[src];
+}
+
+function tamano(n) {
+  return n.getAttr("ctipo") === "imagen" ? { w: n.width(), h: n.height() } : { w: n.getAttr("bw"), h: n.getAttr("bh") };
+}
+
+function ajustarTexto(g) {
+  const bw = g.getAttr("bw"), bh = g.getAttr("bh");
+  const rect = g.findOne(".caja"), txt = g.findOne(".rotulo");
+  rect.size({ width: bw, height: bh });
+  txt.size({ width: bw, height: bh });
+  const largo = Math.max(3, (txt.text() || "").length);
+  txt.fontSize(Math.max(8, Math.min(bh * 0.72, (bw / largo) * 1.7, 90)));
+}
+
+function etiquetaCapa(n) {
+  if (n.getAttr("ctipo") === "imagen") return "Imagen del sujeto #" + ((n.getAttr("cidx") || 0) + 1);
+  return (n.getAttr("crol") === "titulo" ? "Título: " : "Frase: ") + (n.getAttr("ctexto") || "");
+}
+
+function seleccionar(n) {
+  if (!n) { tr.nodes([]); }
+  else {
+    const esImg = n.getAttr("ctipo") === "imagen";
+    tr.keepRatio(esImg);   // esquinas: proporcional (en imágenes); bordes: estiran ese eje
+    tr.enabledAnchors(["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]);
+    tr.nodes([n]);
+    tr.moveToTop();
+  }
+  const esImg = n && n.getAttr("ctipo") === "imagen";
+  ["bFrente", "bAtras"].forEach((b) => ($(b).disabled = !n));
+  ["bDup", "bDel", "bProp"].forEach((b) => ($(b).disabled = !esImg));
+  refrescarLista();
+  $("sel").textContent = n ? etiquetaCapa(n) : "";
+  capaMain.batchDraw();
+}
+
+function refrescarLista() {
+  const cont = $("capas");
+  cont.innerHTML = "";
+  if (!capaMain) return;
+  const sel = seleccionado();
+  let k = 0;
+  capaMain.find(".capa").forEach((n) => {
+    const b = document.createElement("button");
+    const img = n.getAttr("ctipo") === "imagen";
+    b.textContent = img ? "Imagen " + ((n.getAttr("cidx") || 0) + 1) + (n.getAttr("cid").includes("_c") ? " (copia)" : "")
+      : (n.getAttr("crol") === "titulo" ? "Título" : "Frase");
+    if (sel === n) b.className = "on";
+    b.onclick = () => { seleccionar(n); };
+    cont.appendChild(b);
+    k++;
+  });
+  setAlto();
+}
+
+function emitir() {
+  const capas = [];
+  capaMain.find(".capa").forEach((n) => {
+    const s = tamano(n);
+    let rot = ((n.rotation() % 360) + 540) % 360 - 180;
+    capas.push({ id: n.getAttr("cid"), tipo: n.getAttr("ctipo"), idx: n.getAttr("cidx"),
+      cx: n.x() / W, cy: n.y() / H, w: s.w / W, h: s.h / H, rot });
+  });
+  setValor({ firma: firmaActual, capas });
+}
+
+// El área clicable de una imagen es su silueta (no el rectángulo): así un recorte con mucho
+// espacio transparente no tapa a los que tiene debajo.
+function hitPorAlfa(n) {
+  if (n.getAttr("ctipo") !== "imagen") return;
+  try { n.clearCache(); n.cache(); n.drawHitFromCache(20); } catch (e) { /* si falla, queda el rectángulo */ }
+}
+
+function hornear(n) {
+  const sx = Math.abs(n.scaleX()), sy = Math.abs(n.scaleY());
+  if (sx === 1 && sy === 1) return;
+  if (n.getAttr("ctipo") === "imagen") {
+    n.width(n.width() * sx); n.height(n.height() * sy);
+    n.scale({ x: 1, y: 1 });
+    n.offset({ x: n.width() / 2, y: n.height() / 2 });
+    hitPorAlfa(n);
+  } else {
+    n.setAttr("bw", n.getAttr("bw") * sx); n.setAttr("bh", n.getAttr("bh") * sy);
+    n.scale({ x: 1, y: 1 });
+    n.offset({ x: n.getAttr("bw") / 2, y: n.getAttr("bh") / 2 });
+    ajustarTexto(n);
+  }
+}
+
+function enlazar(n) {
+  n.on("click tap dragstart", () => seleccionar(n));
+  n.on("transformend", () => { hornear(n); tr.forceUpdate(); emitir(); });
+  n.on("dragend", emitir);
+}
+
+function crearCapa(c, imgs) {
+  const cx = c.cx * W, cy = c.cy * H, w = Math.max(8, c.w * W), h = Math.max(8, c.h * H);
+  let n;
+  if (c.tipo === "imagen") {
+    n = new Konva.Image({ image: imgs[(c.idx || 0) % imgs.length], x: cx, y: cy, width: w, height: h,
+      offsetX: w / 2, offsetY: h / 2, rotation: c.rot || 0, draggable: true, name: "capa" });
+  } else {
+    n = new Konva.Group({ x: cx, y: cy, offsetX: w / 2, offsetY: h / 2, rotation: c.rot || 0, draggable: true, name: "capa" });
+    n.setAttr("bw", w); n.setAttr("bh", h);
+    n.add(new Konva.Rect({ stroke: "#2b7fff", dash: [6, 4], strokeWidth: 1.5, fill: "rgba(43,127,255,0.10)", name: "caja" }));
+    n.add(new Konva.Text({ text: c.texto || "", align: "center", verticalAlign: "middle", fontStyle: "bold",
+      fill: c.color || "#ffffff", stroke: "rgba(0,0,0,.55)", strokeWidth: 1, fillAfterStrokeEnabled: true, name: "rotulo", listening: false }));
+    ajustarTexto(n);
+  }
+  n.setAttrs({ cid: c.id, ctipo: c.tipo, cidx: c.idx, ctexto: c.texto, crol: c.rol });
+  enlazar(n);
+  hitPorAlfa(n);
+  return n;
+}
+
+async function construir(a) {
+  const mio = ++tokenBuild;
+  firmaActual = a.firma;
+  const maxW = Math.min(document.body.clientWidth || 600, a.ancho_max || 560);
+  let w = maxW, h = (w * a.ratio_h) / a.ratio_w;
+  const maxH = a.alto_max || 680;
+  if (h > maxH) { h = maxH; w = (h * a.ratio_w) / a.ratio_h; }
+  const imgs = await Promise.all((a.imagenes || []).map(cargar));
+  const fondo = a.fondo ? await cargar(a.fondo) : null;
+  if (mio !== tokenBuild) return;                       // llegó un render más nuevo
+
+  if (stage) stage.destroy();
+  W = Math.round(w); H = Math.round(h);
+  stage = new Konva.Stage({ container: "stage", width: W, height: H });
+  capaFondo = new Konva.Layer({ listening: false });
+  capaMain = new Konva.Layer();
+  stage.add(capaFondo, capaMain);
+  capaFondo.add(new Konva.Rect({ width: W, height: H, fill: "#ffffff" }));
+  nodoRef = null;
+  if (fondo) {
+    nodoRef = new Konva.Image({ image: fondo, width: W, height: H, opacity: $("op").value / 100 });
+    capaFondo.add(nodoRef);
+  }
+  (a.capas || []).forEach((c) => capaMain.add(crearCapa(c, imgs)));
+  tr = new Konva.Transformer({ rotateEnabled: true, anchorSize: 10, borderStroke: "#2b7fff", anchorStroke: "#2b7fff",
+    anchorFill: "#ffffff", rotationSnaps: [0, 90, 180, 270], rotationSnapTolerance: 5,
+    boundBoxFunc: (o, n) => (n.width < 12 || n.height < 12 ? o : n) });
+  capaMain.add(tr);
+  stage.on("click tap", (e) => { if (e.target === stage || e.target.getLayer() === capaFondo) seleccionar(null); });
+  stage._imgs = imgs;
+  seleccionar(null);
+  setAlto();
+}
+
+function seleccionado() { return tr && tr.nodes()[0]; }
+
+$("op").addEventListener("input", () => { if (nodoRef) { nodoRef.opacity($("op").value / 100); capaFondo.batchDraw(); } });
+$("bFrente").onclick = () => { const n = seleccionado(); if (n) { n.moveToTop(); tr.moveToTop(); refrescarLista(); capaMain.batchDraw(); emitir(); } };
+$("bAtras").onclick = () => { const n = seleccionado(); if (n) { n.moveToBottom(); refrescarLista(); capaMain.batchDraw(); emitir(); } };
+$("bDel").onclick = quitar;
+$("bProp").onclick = () => {
+  const n = seleccionado();
+  if (!n || n.getAttr("ctipo") !== "imagen") return;
+  const im = n.image();
+  n.height(n.width() * im.naturalHeight / im.naturalWidth);
+  n.offset({ x: n.width() / 2, y: n.height() / 2 });
+  hitPorAlfa(n); tr.forceUpdate(); capaMain.batchDraw(); emitir();
+};
+$("bDup").onclick = () => {
+  const n = seleccionado();
+  if (!n || n.getAttr("ctipo") !== "imagen") return;
+  const c = { id: n.getAttr("cid").replace(/_c\d+$/, "") + "_c" + (++contadorDup) + "_" + Date.now().toString(36),
+    tipo: "imagen", idx: n.getAttr("cidx"), cx: n.x() / W + 0.03, cy: n.y() / H + 0.03,
+    w: n.width() / W, h: n.height() / H, rot: n.rotation() };
+  const nuevo = crearCapa(c, stage._imgs);
+  capaMain.add(nuevo); tr.moveToTop(); seleccionar(nuevo); emitir();
+};
+
+function quitar() {
+  const n = seleccionado();
+  if (!n || n.getAttr("ctipo") !== "imagen") return;
+  seleccionar(null); n.destroy(); refrescarLista(); capaMain.batchDraw(); emitir();
+}
+
+document.addEventListener("keydown", (e) => {
+  const n = seleccionado();
+  if (!n) return;
+  if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); quitar(); return; }
+  const paso = e.shiftKey ? 10 : 1;
+  const d = { ArrowLeft: [-paso, 0], ArrowRight: [paso, 0], ArrowUp: [0, -paso], ArrowDown: [0, paso] }[e.key];
+  if (d) { e.preventDefault(); n.x(n.x() + d[0]); n.y(n.y() + d[1]); capaMain.batchDraw(); clearTimeout(window._t); window._t = setTimeout(emitir, 250); }
+});
+
+window.addEventListener("message", (ev) => {
+  if (!ev.data || ev.data.type !== "streamlit:render") return;
+  const t = ev.data.theme;
+  if (t) {
+    document.documentElement.style.setProperty("--fg", t.textColor);
+    document.documentElement.style.setProperty("--bg2", t.secondaryBackgroundColor);
+    document.documentElement.style.setProperty("--accent", t.primaryColor);
+  }
+  const a = ev.data.args || {};
+  if (a.firma !== firmaActual) construir(a);
+});
+window.addEventListener("resize", setAlto);
+enviar("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

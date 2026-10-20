@@ -27,6 +27,8 @@ from google import genai
 from google.genai import types
 from colorthief import ColorThief
 
+import composicion
+
 load_dotenv()
 
 
@@ -150,7 +152,12 @@ def _notificar_progreso(
     """Emite evento de progreso tanto a consola (stdout/docker logs) como al callback de UI."""
     timestamp = datetime.now().strftime("%H:%M:%S")
     simbolo = {"running": "⏳", "success": "✅", "warning": "⚠️", "error": "❌", "info": "ℹ️"}.get(estado, "•")
-    print(f"[{timestamp}] {simbolo} [{etapa_idx}/{total_etapas}] {fase}: {mensaje}", flush=True)
+    linea = f"[{timestamp}] {simbolo} [{etapa_idx}/{total_etapas}] {fase}: {mensaje}"
+    try:
+        print(linea, flush=True)
+    except UnicodeEncodeError:
+        # Consolas Windows en cp1252: no deben abortar una generación por un emoji
+        print(linea.encode("ascii", "replace").decode("ascii"), flush=True)
     if callback:
         try:
             callback(etapa_idx, total_etapas, fase, mensaje, estado, detalle or {})
@@ -506,7 +513,8 @@ def analizar_sujeto(
 
 
 def quitar_fondo_por_chroma(
-    imagen: Image.Image, color_chroma_hex: str, tolerancia: float = 60.0, suavizado: float = 40.0
+    imagen: Image.Image, color_chroma_hex: str, tolerancia: float = 60.0, suavizado: float = 40.0,
+    despill: bool = True,
 ) -> Image.Image:
     """
     Chroma key determinístico local: separa el fondo plano exacto sin IA ni costo de API.
@@ -529,7 +537,238 @@ def quitar_fondo_por_chroma(
     canal_alpha = canal_alpha.filter(ImageFilter.GaussianBlur(radius=1))
 
     r, g, b = imagen_rgb.split()
+    if despill:
+        # Quita el halo verde de los píxeles de borde (semitransparentes): el verde nunca
+        # supera al mayor de rojo/azul. No toca los píxeles totalmente opacos.
+        a = np.asarray(canal_alpha)
+        borde = (a > 0) & (a < 250)
+        if borde.any():
+            r_a, g_a, b_a = (np.asarray(c).copy() for c in (r, g, b))
+            g_a[borde] = np.minimum(g_a[borde], np.maximum(r_a[borde], b_a[borde]))
+            g = Image.fromarray(g_a, mode="L")
     return Image.merge("RGBA", (r, g, b, canal_alpha))
+
+
+def recortar_sujeto(imagen: Image.Image) -> Image.Image:
+    """Quita el fondo de una foto con rembg (local, gratis). Devuelve RGBA. Lanza excepción si falla."""
+    from rembg import remove
+    reducida = _redimensionar_si_es_muy_grande(imagen, LADO_MAXIMO_PARA_RECORTE)
+    buffer = io.BytesIO()
+    reducida.save(buffer, format="PNG")
+    return Image.open(io.BytesIO(remove(buffer.getvalue()))).convert("RGBA")
+
+
+def _aplanar_sobre_color(imagen: Image.Image, color_hex: str = "#808080") -> Image.Image:
+    """
+    Compone una imagen con transparencia sobre un color plano. Los recortes RGBA se envían así al
+    modelo para que el fondo recortado no se interprete como negro u otro color imprevisto.
+    """
+    if imagen.mode not in ("RGBA", "LA", "P"):
+        return imagen
+    rgba = imagen.convert("RGBA")
+    h = color_hex.lstrip("#")
+    fondo = Image.new("RGBA", rgba.size, (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255))
+    return Image.alpha_composite(fondo, rgba).convert("RGB")
+
+
+def detectar_composicion_referencia(imagenes_referencia: list[Image.Image]) -> tuple[list[dict], dict]:
+    """
+    Pide a Gemini (visión barata) las cajas de ilustraciones y textos de la referencia para
+    pre-ubicar la mesa de composición. Devuelve (cajas_normalizadas, tokens). Una sola llamada.
+    """
+    client = obtener_cliente_gemini()
+    imagen = _redimensionar_si_es_muy_grande(imagenes_referencia[0], LADO_MAXIMO_VISION)
+    tokens = {"prompt": 0, "candidates": 0, "total": 0}
+    try:
+        resp = client.models.generate_content(
+            model=MODELO_VISION,
+            contents=[composicion.PROMPT_DETECCION_CAJAS, imagen.convert("RGB")],
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+    except Exception as e:
+        diag, sug = diagnosticar_error_api(e)
+        raise ErrorProcesoPolera(
+            fase="Detección de composición",
+            mensaje=f"No se pudo analizar la composición de la referencia: {e}",
+            diagnostico=diag, sugerencia=sug, error_original=e,
+        )
+    meta = getattr(resp, "usage_metadata", None)
+    if meta:
+        tokens["prompt"] = getattr(meta, "prompt_token_count", 0) or 0
+        tokens["candidates"] = getattr(meta, "candidates_token_count", 0) or 0
+        tokens["total"] = getattr(meta, "total_token_count", 0) or 0
+    return composicion.parsear_cajas(resp.text or ""), tokens
+
+
+def composicion_ratio_wh(ratio_str: str) -> tuple[int, int]:
+    """'3:4' -> (3, 4)."""
+    a, b = ratio_str.split(":")
+    return int(a), int(b)
+
+
+def _postprocesar(
+    imagen_base: Image.Image,
+    color_fondo_solido: str | None,
+    ancho_px: int,
+    alto_px: int,
+    layout_texto: list[dict] | None = None,
+    config_texto: dict | None = None,
+    avisar=None,
+) -> Image.Image:
+    """Chroma key (si no hay fondo sólido), reescalado final y, opcionalmente, texto local con fuentes reales."""
+    avisar = avisar or (lambda m: None)
+    if color_fondo_solido:
+        imagen = imagen_base
+        avisar("Fondo sólido conservado.")
+    else:
+        imagen = quitar_fondo_por_chroma(imagen_base, COLOR_CHROMA_DEFECTO)
+        avisar("Fondo transparente aplicado vía chroma key.")
+    imagen = imagen.resize((ancho_px, alto_px), Image.LANCZOS)
+    if layout_texto:
+        cfg = config_texto or {}
+        imagen = composicion.aplicar_textos_locales(imagen, layout_texto, cfg.get("fuente_titulo"), cfg.get("fuente_frases"))
+        avisar("Texto compuesto localmente con fuentes reales.")
+    return imagen
+
+
+def editar_diseno(
+    imagen_cruda: Image.Image,
+    instruccion: str,
+    modelo_imagen: str = MODELOS_IMAGEN[MODELO_IMAGEN_POR_DEFECTO],
+    proporcion: str = "3:4",
+    color_fondo_solido: str | None = None,
+    layout_texto: list[dict] | None = None,
+    config_texto: dict | None = None,
+) -> Image.Image:
+    """
+    Edita un diseño ya generado enviando la imagen cruda del modelo + una instrucción puntual
+    (más barato y más controlable que regenerar desde cero). Devuelve la imagen final postprocesada.
+    """
+    if not instruccion or not instruccion.strip():
+        raise ErrorProcesoPolera(
+            fase="Edición", mensaje="La instrucción de edición está vacía.",
+            diagnostico="Se necesita describir qué cambiar.", sugerencia="Escribe, por ejemplo: 'hazle los lentes más grandes'.",
+        )
+    client = obtener_cliente_gemini()
+    ratio_str = proporcion if proporcion in DIMENSIONES_POR_PROPORCION else "3:4"
+    ancho_px, alto_px = DIMENSIONES_POR_PROPORCION[ratio_str]
+    contenidos = [
+        "### [DISEÑO ACTUAL]:\nEste es el diseño de polera que debes modificar:",
+        imagen_cruda.convert("RGB"),
+        "\n### [INSTRUCCIÓN DE EDICIÓN]:\n"
+        f"{instruccion.strip()}\n"
+        "Aplica SOLO este cambio. Conserva idéntico todo lo demás: composición, posiciones, estilo, colores, "
+        "tipografía y fondo. Devuelve la imagen completa, en la misma proporción y sin mockups.",
+    ]
+    registro = {"generacion_imagen": {"prompt": 0, "candidates": 0, "total": 0}}
+    nueva = _llamar_modelo_imagen(client, modelo_imagen, contenidos, ratio_str, registro)
+    final = _postprocesar(nueva, color_fondo_solido, ancho_px, alto_px, layout_texto, config_texto)
+    final.info["imagen_cruda"] = nueva
+    final.info["ratio_str"] = ratio_str
+    final.info["registro_tokens"] = {**registro, "total_tokens": registro["generacion_imagen"]["total"]}
+    return final
+
+
+def _llamar_modelo_imagen(client, modelo_imagen: str, contenidos_multimodales: list, ratio_str: str, registro_tokens: dict) -> Image.Image:
+    """Llama al modelo de imagen, inspecciona la respuesta (bloqueos, rechazos) y devuelve la imagen cruda."""
+    try:
+        respuesta_imagen = client.models.generate_content(
+            model=modelo_imagen,
+            contents=contenidos_multimodales,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio=ratio_str,
+                ),
+            ),
+        )
+    except Exception as e:
+        diag, sug = diagnosticar_error_api(e)
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje=f"Error en la llamada a la API de Imagen: {e}",
+            diagnostico=diag,
+            sugerencia=sug,
+            error_original=e,
+            tokens_gastados=registro_tokens,
+        )
+
+    # Registro de tokens de imagen si están disponibles
+    if hasattr(respuesta_imagen, "usage_metadata") and respuesta_imagen.usage_metadata:
+        registro_tokens["generacion_imagen"]["prompt"] = getattr(respuesta_imagen.usage_metadata, "prompt_token_count", 0) or 0
+        registro_tokens["generacion_imagen"]["candidates"] = getattr(respuesta_imagen.usage_metadata, "candidates_token_count", 0) or 0
+        registro_tokens["generacion_imagen"]["total"] = getattr(respuesta_imagen.usage_metadata, "total_token_count", 0) or 0
+
+    # Inspección forense de la respuesta (seguridad, rechazos o falta de imagen)
+    if hasattr(respuesta_imagen, "prompt_feedback") and respuesta_imagen.prompt_feedback:
+        fb = respuesta_imagen.prompt_feedback
+        if getattr(fb, "block_reason", None):
+            raise ErrorProcesoPolera(
+                fase="Generación con IA (Modelo de Imagen)",
+                mensaje=f"Google bloqueó la solicitud por política de contenido: {fb.block_reason}",
+                diagnostico="El prompt o alguna de las fotos de entrada activó un filtro de seguridad antes de procesar.",
+                sugerencia="Modifica el título, evita mencionar figuras públicas o nombres de marcas comerciales.",
+                detalle_tecnico=str(fb),
+                tokens_gastados=registro_tokens,
+            )
+
+    candidatos = getattr(respuesta_imagen, "candidates", None)
+    if not candidatos or len(candidatos) == 0:
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje="Gemini no devolvió ningún candidato de respuesta.",
+            diagnostico="La API de Google terminó la petición sin devolver candidatos de imagen.",
+            sugerencia="Verifica tu cuota de facturación en Google AI Studio o prueba seleccionando el modelo 'Lite'.",
+            detalle_tecnico=str(respuesta_imagen),
+            tokens_gastados=registro_tokens,
+        )
+
+    candidato = candidatos[0]
+    finish_reason = getattr(candidato, "finish_reason", None)
+    finish_reason_str = str(finish_reason).upper() if finish_reason else ""
+
+    if finish_reason and "STOP" not in finish_reason_str:
+        diagnostico = f"La generación se detuvo por el motivo: {finish_reason}"
+        sugerencia = "Modifica los textos o fotos para evitar bloqueos por políticas de IA."
+        if "SAFETY" in finish_reason_str:
+            ratings = getattr(candidato, "safety_ratings", [])
+            ratings_str = ", ".join([f"{r.category}: {r.probability}" for r in ratings if getattr(r, 'probability', None)])
+            diagnostico = f"Bloqueado por filtros de seguridad de Gemini ({ratings_str or 'SAFETY'})."
+            sugerencia = "La IA detectó contenido sensible, posibles derechos de autor o parecido a personas protegidas. Prueba cambiando el título o usando otra imagen del sujeto."
+        elif "RECITATION" in finish_reason_str:
+            diagnostico = "Bloqueado por posible reproducción no autorizada de material protegido (RECITATION)."
+            sugerencia = "Evita textos o marcas registradas en el título o frases secundarias."
+
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje=f"Generación rechazada por la IA (Motivo: {finish_reason})",
+            diagnostico=diagnostico,
+            sugerencia=sugerencia,
+            detalle_tecnico=f"finish_reason={finish_reason}, safety_ratings={getattr(candidato, 'safety_ratings', 'N/A')}",
+            tokens_gastados=registro_tokens,
+        )
+
+    # Extraer la imagen de las partes
+    imagen_base = None
+    texto_respuesta = ""
+    if hasattr(candidato, "content") and candidato.content and hasattr(candidato.content, "parts"):
+        for parte in candidato.content.parts:
+            if getattr(parte, "inline_data", None) is not None:
+                imagen_base = Image.open(io.BytesIO(parte.inline_data.data))
+                break
+            elif getattr(parte, "text", None):
+                texto_respuesta += parte.text
+
+    if imagen_base is None:
+        raise ErrorProcesoPolera(
+            fase="Generación con IA (Modelo de Imagen)",
+            mensaje="Gemini no devolvió datos de imagen en su respuesta.",
+            diagnostico=f"El modelo respondió solo con texto: '{texto_respuesta}'" if texto_respuesta else "No se recibieron bytes de imagen válidos.",
+            sugerencia="Prueba con otra proporción o revisa si el modelo seleccionado está disponible.",
+            detalle_tecnico=str(candidato),
+            tokens_gastados=registro_tokens,
+        )
+    return imagen_base
 
 
 def generar_diseno_desde_imagenes(
@@ -561,11 +800,24 @@ def generar_diseno_desde_imagenes(
     callback_progreso=None,
     cache_analisis: dict | None = None,
     modo_ahorro_tokens: bool = False,
+    layout: list[dict] | None = None,
+    modo_guia: str = "reilustrar",
+    texto_local: bool = False,
+    config_texto: dict | None = None,
+    recortes_precalculados: list[Image.Image] | None = None,
 ) -> Image.Image:
     """
     Genera el diseño completo combinando la plantilla abstracta de la referencia
     con el sujeto real del usuario.
-    
+
+    Mesa de composición (opcional, todo None/False = comportamiento clásico):
+    - layout: capas de composicion.py con la ubicación elegida de imágenes y textos.
+    - modo_guia: 'reilustrar' (redibujar en el estilo, en esa posición) o 'respetar'
+      (conservar el aspecto de las imágenes del usuario, solo integrarlas).
+    - texto_local: el modelo NO dibuja título/frases; se componen después con fuentes reales.
+    - config_texto: {"fuente_titulo": ruta, "fuente_frases": ruta} para el texto local.
+    - recortes_precalculados: recortes ya hechos (evita repetir rembg).
+
     Incluye:
     - Callback de progreso y logging en tiempo real para la consola Streamlit.
     - Manejo de excepciones detallado (ErrorProcesoPolera).
@@ -740,7 +992,10 @@ def generar_diseno_desde_imagenes(
     t0 = time.time()
     imagenes_personaje_final = []
 
-    if recortar_personaje:
+    if recortes_precalculados:
+        _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", "Se reutilizan los recortes de la mesa de composición (0 costo).", "info")
+        imagenes_personaje_final = list(recortes_precalculados)
+    elif recortar_personaje:
         _notificar_progreso(
             callback_progreso, 4, total_etapas, "Recorte de Sujeto",
             f"Recortando fondo de {len(imagenes_personaje)} imagen(es) de forma local (sin coste de tokens)...",
@@ -780,13 +1035,58 @@ def generar_diseno_desde_imagenes(
     # =========================================================================
     _notificar_progreso(callback_progreso, 5, total_etapas, "Generación con IA", "Sintetizando especificación maestra y enviando solicitud a Gemini...", "running")
     
+    # Proporción del lienzo (también la necesita la guía de composición)
+    ratio_str = "3:4"
+    for r in ["1:1", "9:16", "4:3", "3:4"]:
+        if proporcion_estampado.startswith(r):
+            ratio_str = r
+            break
+
+    # Mesa de composición: capas del usuario -> imagen guía + coordenadas explícitas
+    capas_imagen = [c for c in (layout or []) if c.get("tipo") == "imagen"]
+    usar_layout = bool(layout) and bool(capas_imagen)
+    imagen_guia = None
+    bloque_composicion = ""
+    regla_referencia = "La referencia es SOLO una plantilla de diagramación; el contenido visual entero es 100% " + sujeto_nombre + "."
+
     # 1. Asignación de elementos a la cuadrícula
     distribucion = analisis_ref.get("distribucion_elementos", [])
     lineas_elementos = []
-    for i in range(cant_elementos):
-        var_texto = variaciones[i % len(variaciones)] if variaciones else f"Variación #{i+1} de {sujeto_nombre}"
-        pos_info = distribucion[i].get("posicion", f"Posición #{i+1}") if i < len(distribucion) else f"Posición #{i+1}"
-        lineas_elementos.append(f"  * Elemento {i+1} ({pos_info}): {var_texto} (de {sujeto_nombre}).")
+    if usar_layout:
+        cant_elementos = len(capas_imagen)
+        n_fotos = max(1, len(imagenes_personaje_final))
+        usos_por_foto: dict[int, int] = {}
+        for capa in capas_imagen:
+            idx = capa.get("idx", 0) % n_fotos
+            usos_por_foto[idx] = usos_por_foto.get(idx, 0) + 1
+        for k, capa in enumerate(capas_imagen):
+            idx = capa.get("idx", 0) % n_fotos
+            zona = composicion._zona(capa["cx"], capa["cy"])
+            linea = f"  * Elemento {k+1} (zona {zona}): {sujeto_nombre}, tal como aparece en la imagen #{idx+1} de la GUÍA DE COMPOSICIÓN."
+            if usos_por_foto[idx] > 1 and variaciones:
+                linea += f" Variante propia: {variaciones[k % len(variaciones)]}."
+            lineas_elementos.append(linea)
+
+        imagen_guia = composicion.componer_guia(
+            layout, imagenes_personaje_final, composicion_ratio_wh(ratio_str),
+            color_fondo_solido or COLOR_CHROMA_DEFECTO, incluir_texto=not texto_local,
+        )
+        bloque_composicion = (
+            "\n* GUÍA DE COMPOSICIÓN OBLIGATORIA (la imagen de guía adjunta es un boceto de ubicación y escala; "
+            "respétala con precisión). Coordenadas en % del lienzo, origen arriba-izquierda, x→derecha, y→abajo:\n"
+            + composicion.describir_layout(layout, texto_local)
+            + "\n* El boceto es SOLO una guía de ubicación: NO copies su fondo plano, sus cajas ni sus bordes tenues; "
+              "redibuja todo integrado en el estilo de la referencia, en la misma posición y proporción."
+        )
+        regla_referencia = (
+            "La referencia es SOLO guía de estilo (técnica, tipografía, color); la ubicación y escala de cada elemento "
+            f"las define la GUÍA DE COMPOSICIÓN; el contenido visual entero es 100% {sujeto_nombre}."
+        )
+    else:
+        for i in range(cant_elementos):
+            var_texto = variaciones[i % len(variaciones)] if variaciones else f"Variación #{i+1} de {sujeto_nombre}"
+            pos_info = distribucion[i].get("posicion", f"Posición #{i+1}") if i < len(distribucion) else f"Posición #{i+1}"
+            lineas_elementos.append(f"  * Elemento {i+1} ({pos_info}): {var_texto} (de {sujeto_nombre}).")
     instrucciones_elementos_texto = "\n".join(lineas_elementos)
 
     # 2. Tipografía y textos
@@ -851,7 +1151,13 @@ def generar_diseno_desde_imagenes(
     if instrucciones_extra and instrucciones_extra.strip():
         directrices_usuario.append(f"- INSTRUCCIONES ESPECÍFICAS ADICIONALES: {instrucciones_extra.strip()}")
 
-    if "total" in nivel_estilizacion.lower():
+    if usar_layout and modo_guia == "respetar":
+        directrices_usuario.append(
+            "- DIRECTIVA DE ESTILIZACIÓN (RESPETAR IMÁGENES DEL USUARIO): Conserva el aspecto, los rasgos y las "
+            "proporciones de las ilustraciones de la GUÍA DE COMPOSICIÓN. Aplica sobre ellas solo el tratamiento de "
+            "tinta, trama, color, bordes y textura de la referencia para que se integren al arte sin cambiar quiénes son."
+        )
+    elif "total" in nivel_estilizacion.lower():
         directrices_usuario.append(
             "- DIRECTIVA DE ESTILIZACIÓN (TRANSFORMACIÓN ARTÍSTICA TOTAL): Dibuja al sujeto completamente desde cero "
             "utilizando la misma técnica manual, trazo, entintado y pigmento del ilustrador de la imagen de referencia. "
@@ -898,6 +1204,34 @@ def generar_diseno_desde_imagenes(
     if iluminacion and not iluminacion.startswith("Auto"):
         atmosfera_texto += f". Iluminación: {iluminacion}"
 
+    if usar_layout:
+        regla_variedad = (
+            "* REGLA DE FIDELIDAD A LA GUÍA: cada elemento corresponde a la ilustración indicada en la guía; "
+            "no agregues ilustraciones extra ni quites ninguna, y no cambies su ubicación ni su escala relativa."
+            + ("" if texto_local else f" Si el diseño incluye rótulos pequeños bajo cada ilustración, deben nombrar detalles relevantes de {sujeto_nombre}.")
+        )
+    else:
+        regla_variedad = (
+            "* REGLA DE VARIEDAD: Cada elemento debe ser una variante, perspectiva o detalle único como se especifica arriba. "
+            "No repetir la misma ilustración idéntica. Si el diseño incluye rótulos pequeños debajo de cada ilustración, "
+            f"estos deben nombrar detalles relevantes de {sujeto_nombre} o términos científicos/botánicos/técnicos relacionados con {sujeto_nombre}."
+        )
+
+    if usar_layout and texto_local:
+        seccion_texto = (
+            "3. TIPOGRAFÍA Y TEXTOS:\n"
+            "* NO DIBUJES NINGÚN TEXTO, LETRA, NÚMERO NI RÓTULO en la pieza (los textos se agregarán después con otra herramienta). "
+            "Deja las ZONAS LIBRES DE TEXTO indicadas en la guía con el fondo o la ornamentación del estilo, sin letras ni garabatos que parezcan escritura."
+        )
+    else:
+        seccion_texto = f"""3. TIPOGRAFÍA Y TEXTOS (TEXTOS EXACTOS DEL USUARIO):
+- Título principal: "{titulo}" (tamaño {tamano_titulo})
+- Anatomía y estilo de fuente: {estilo_fuente}
+- Efectos visuales del título: {detalles_fuente}
+- Posición y disposición del título: {"según la GUÍA DE COMPOSICIÓN" if usar_layout else posicion_fuente}
+- Textos secundarios / subtítulos: {frases_texto} (Estilo tipográfico: {estilo_subtitulos})
+* REGLA DE TEXTO: Dibuja ÚNICAMENTE los textos indicados por el usuario ("{titulo}" y frases secundarias especificadas). PROHIBIDO copiar o inventar frases ajenas (como textos de memes, fósiles o frases de la referencia). Ortografía exacta y tipografía nítida."""
+
     prompt_final = f"""
 [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO PARA POLERA / T-SHIRT ARTWORK]
 {bloque_directrices_usuario}
@@ -905,20 +1239,14 @@ def generar_diseno_desde_imagenes(
 - Sujeto objetivo a ilustrar: {sujeto_nombre}
 - Características visuales clave de {sujeto_nombre}: {sujeto_desc}
 * REGLA ABSOLUTA DE CONTENIDO: Cada una de las ilustraciones en esta pieza debe representar EXCLUSIVAMENTE a {sujeto_nombre}, basándose fielmente en las fotos adjuntas.
-* PROHIBICIÓN ESTRICTA: PROHIBIDO dibujar cualquier elemento o tema ajeno a {sujeto_nombre}. PROHIBIDO dibujar fósiles, huesos, dinosaurios, personas o elementos de la imagen de referencia. La referencia es SOLO una plantilla de diagramación; el contenido visual entero es 100% {sujeto_nombre}.
+* PROHIBICIÓN ESTRICTA: PROHIBIDO dibujar cualquier elemento o tema ajeno a {sujeto_nombre}. PROHIBIDO dibujar fósiles, huesos, dinosaurios, personas o elementos de la imagen de referencia. {regla_referencia}
 {bloque_negativos}
 2. DESGLOSE DE ELEMENTOS Y VARIACIONES A ILUSTRAR:
 Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composición, todos correspondientes a {sujeto_nombre}:
-{instrucciones_elementos_texto}
-* REGLA DE VARIEDAD: Cada elemento debe ser una variante, perspectiva o detalle único como se especifica arriba. No repetir la misma ilustración idéntica. Si el diseño incluye rótulos pequeños debajo de cada ilustración, estos deben nombrar detalles relevantes de {sujeto_nombre} o términos científicos/botánicos/técnicos relacionados con {sujeto_nombre}.
+{instrucciones_elementos_texto}{bloque_composicion}
+{regla_variedad}
 
-3. TIPOGRAFÍA Y TEXTOS (TEXTOS EXACTOS DEL USUARIO):
-- Título principal: "{titulo}" (tamaño {tamano_titulo})
-- Anatomía y estilo de fuente: {estilo_fuente}
-- Efectos visuales del título: {detalles_fuente}
-- Posición y disposición del título: {posicion_fuente}
-- Textos secundarios / subtítulos: {frases_texto} (Estilo tipográfico: {estilo_subtitulos})
-* REGLA DE TEXTO: Dibuja ÚNICAMENTE los textos indicados por el usuario ("{titulo}" y frases secundarias especificadas). PROHIBIDO copiar o inventar frases ajenas (como textos de memes, fósiles o frases de la referencia). Ortografía exacta y tipografía nítida.
+{seccion_texto}
 
 4. TÉCNICA ARTÍSTICA Y MICRO-ESTILO (IMITACIÓN FORENSE DE LA REFERENCIA):
 - Técnica visual dominante: {tecnica_dominante} aplicada a {sujeto_nombre}
@@ -937,12 +1265,6 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 - RESTRICCIÓN DE SALIDA: Genera EXCLUSIVAMENTE el archivo de arte gráfico 2D plano, de frente, ocupando el lienzo completo. PROHIBIDO generar mockups de poleras, personas vistiendo ropa, pliegues de tela o fondos de estudio.
 """
 
-    ratio_str = "3:4"
-    for r in ["1:1", "9:16", "4:3", "3:4"]:
-        if proporcion_estampado.startswith(r):
-            ratio_str = r
-            break
-
     ancho_px, alto_px = DIMENSIONES_POR_PROPORCION.get(ratio_str, (ANCHO_FINAL_PX, ALTO_FINAL_PX))
 
     # Optimización de referencias para la llamada multimodal:
@@ -956,9 +1278,16 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
         *imagenes_ref_optimizadas,
         "\n### [IMAGEN(ES) DEL SUJETO / PERSONAJE OBJETIVO]:\n"
         "Este es el sujeto objetivo que debes ilustrar adoptando por completo el estilo y técnica de las referencias anteriores:",
-        *imagenes_personaje_final,
-        f"\n### [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO]:\n{prompt_final}",
+        *[_aplanar_sobre_color(img) for img in imagenes_personaje_final],
     ]
+    if imagen_guia is not None:
+        contenidos_multimodales += [
+            "\n### [GUÍA DE COMPOSICIÓN: BOCETO DE UBICACIÓN Y ESCALA]:\n"
+            "Esta imagen indica DÓNDE va cada ilustración (y cada texto, si aparece) y a qué tamaño. "
+            "Respeta esas posiciones y proporciones; el estilo viene de las referencias, no de este boceto:",
+            imagen_guia,
+        ]
+    contenidos_multimodales.append(f"\n### [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO]:\n{prompt_final}")
 
     _notificar_progreso(
         callback_progreso, 5, total_etapas, "Generación con IA",
@@ -967,103 +1296,7 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
     )
 
     t0_imagen = time.time()
-    try:
-        respuesta_imagen = client.models.generate_content(
-            model=modelo_imagen,
-            contents=contenidos_multimodales,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio=ratio_str,
-                ),
-            ),
-        )
-    except Exception as e:
-        diag, sug = diagnosticar_error_api(e)
-        raise ErrorProcesoPolera(
-            fase="Generación con IA (Modelo de Imagen)",
-            mensaje=f"Error en la llamada a la API de Imagen: {e}",
-            diagnostico=diag,
-            sugerencia=sug,
-            error_original=e,
-            tokens_gastados=registro_tokens,
-        )
-
-    # Registro de tokens de imagen si están disponibles
-    if hasattr(respuesta_imagen, "usage_metadata") and respuesta_imagen.usage_metadata:
-        registro_tokens["generacion_imagen"]["prompt"] = getattr(respuesta_imagen.usage_metadata, "prompt_token_count", 0) or 0
-        registro_tokens["generacion_imagen"]["candidates"] = getattr(respuesta_imagen.usage_metadata, "candidates_token_count", 0) or 0
-        registro_tokens["generacion_imagen"]["total"] = getattr(respuesta_imagen.usage_metadata, "total_token_count", 0) or 0
-
-    # Inspección forense de la respuesta (seguridad, rechazos o falta de imagen)
-    if hasattr(respuesta_imagen, "prompt_feedback") and respuesta_imagen.prompt_feedback:
-        fb = respuesta_imagen.prompt_feedback
-        if getattr(fb, "block_reason", None):
-            raise ErrorProcesoPolera(
-                fase="Generación con IA (Modelo de Imagen)",
-                mensaje=f"Google bloqueó la solicitud por política de contenido: {fb.block_reason}",
-                diagnostico="El prompt o alguna de las fotos de entrada activó un filtro de seguridad antes de procesar.",
-                sugerencia="Modifica el título, evita mencionar figuras públicas o nombres de marcas comerciales.",
-                detalle_tecnico=str(fb),
-                tokens_gastados=registro_tokens,
-            )
-
-    candidatos = getattr(respuesta_imagen, "candidates", None)
-    if not candidatos or len(candidatos) == 0:
-        raise ErrorProcesoPolera(
-            fase="Generación con IA (Modelo de Imagen)",
-            mensaje="Gemini no devolvió ningún candidato de respuesta.",
-            diagnostico="La API de Google terminó la petición sin devolver candidatos de imagen.",
-            sugerencia="Verifica tu cuota de facturación en Google AI Studio o prueba seleccionando el modelo 'Lite'.",
-            detalle_tecnico=str(respuesta_imagen),
-            tokens_gastados=registro_tokens,
-        )
-
-    candidato = candidatos[0]
-    finish_reason = getattr(candidato, "finish_reason", None)
-    finish_reason_str = str(finish_reason).upper() if finish_reason else ""
-
-    if finish_reason and "STOP" not in finish_reason_str:
-        diagnostico = f"La generación se detuvo por el motivo: {finish_reason}"
-        sugerencia = "Modifica los textos o fotos para evitar bloqueos por políticas de IA."
-        if "SAFETY" in finish_reason_str:
-            ratings = getattr(candidato, "safety_ratings", [])
-            ratings_str = ", ".join([f"{r.category}: {r.probability}" for r in ratings if getattr(r, 'probability', None)])
-            diagnostico = f"Bloqueado por filtros de seguridad de Gemini ({ratings_str or 'SAFETY'})."
-            sugerencia = "La IA detectó contenido sensible, posibles derechos de autor o parecido a personas protegidas. Prueba cambiando el título o usando otra imagen del sujeto."
-        elif "RECITATION" in finish_reason_str:
-            diagnostico = "Bloqueado por posible reproducción no autorizada de material protegido (RECITATION)."
-            sugerencia = "Evita textos o marcas registradas en el título o frases secundarias."
-
-        raise ErrorProcesoPolera(
-            fase="Generación con IA (Modelo de Imagen)",
-            mensaje=f"Generación rechazada por la IA (Motivo: {finish_reason})",
-            diagnostico=diagnostico,
-            sugerencia=sugerencia,
-            detalle_tecnico=f"finish_reason={finish_reason}, safety_ratings={getattr(candidato, 'safety_ratings', 'N/A')}",
-            tokens_gastados=registro_tokens,
-        )
-
-    # Extraer la imagen de las partes
-    imagen_base = None
-    texto_respuesta = ""
-    if hasattr(candidato, "content") and candidato.content and hasattr(candidato.content, "parts"):
-        for parte in candidato.content.parts:
-            if getattr(parte, "inline_data", None) is not None:
-                imagen_base = Image.open(io.BytesIO(parte.inline_data.data))
-                break
-            elif getattr(parte, "text", None):
-                texto_respuesta += parte.text
-
-    if imagen_base is None:
-        raise ErrorProcesoPolera(
-            fase="Generación con IA (Modelo de Imagen)",
-            mensaje="Gemini no devolvió datos de imagen en su respuesta.",
-            diagnostico=f"El modelo respondió solo con texto: '{texto_respuesta}'" if texto_respuesta else "No se recibieron bytes de imagen válidos.",
-            sugerencia="Prueba con otra proporción o revisa si el modelo seleccionado está disponible.",
-            detalle_tecnico=str(candidato),
-            tokens_gastados=registro_tokens,
-        )
+    imagen_base = _llamar_modelo_imagen(client, modelo_imagen, contenidos_multimodales, ratio_str, registro_tokens)
 
     dt_img = round(time.time() - t0_imagen, 1)
     _notificar_progreso(callback_progreso, 5, total_etapas, "Generación con IA", f"Imagen generada exitosamente en {dt_img}s.", "success")
@@ -1075,14 +1308,11 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
     
     t0_post = time.time()
     try:
-        if color_fondo_solido:
-            imagen_resultado = imagen_base
-            _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", "Fondo sólido conservado.", "info")
-        else:
-            imagen_resultado = quitar_fondo_por_chroma(imagen_base, COLOR_CHROMA_DEFECTO)
-            _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", "Fondo transparente aplicado vía chroma key.", "info")
-
-        imagen_resultado = imagen_resultado.resize((ancho_px, alto_px), Image.LANCZOS)
+        imagen_resultado = _postprocesar(
+            imagen_base, color_fondo_solido, ancho_px, alto_px,
+            layout if texto_local else None, config_texto,
+            lambda m: _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", m, "info"),
+        )
     except Exception as e:
         raise ErrorProcesoPolera(
             fase="Postprocesamiento y Recorte",
@@ -1102,6 +1332,8 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 
     # Adjuntar metadatos al resultado para que la interfaz los consuma
     imagen_resultado.info["prompt_final"] = prompt_final
+    imagen_resultado.info["imagen_cruda"] = imagen_base  # salida del modelo sin chroma ni texto local (para editar)
+    imagen_resultado.info["ratio_str"] = ratio_str
     imagen_resultado.info["registro_tokens"] = registro_tokens
     imagen_resultado.info["tiempo_total_segundos"] = tiempo_total
     imagen_resultado.info["cache_generada"] = {
