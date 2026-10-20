@@ -7,7 +7,9 @@ Correr con:
 """
 
 import io
+import os
 import sys
+import hmac
 import time
 import json
 import base64
@@ -43,6 +45,28 @@ _mesa_componente = components.declare_component(
 )
 
 st.set_page_config(page_title="Generador de Poleras con IA", layout="centered", page_icon="👕")
+
+
+def _exigir_acceso():
+    """Si APP_PASSWORD esta definida (servidor), pide la clave antes de mostrar nada.
+    Sin esa variable (uso local) no cambia nada."""
+    clave = os.getenv("APP_PASSWORD", "")
+    if not clave or st.session_state.get("acceso_ok"):
+        return
+    st.title("🔒 Acceso privado")
+    with st.form("acceso"):
+        intento = st.text_input("Clave de acceso", type="password")
+        entrar = st.form_submit_button("Entrar")
+    if entrar:
+        if hmac.compare_digest(intento.encode(), clave.encode()):
+            st.session_state["acceso_ok"] = True
+            st.rerun()
+        time.sleep(1.5)  # frena la fuerza bruta
+        st.error("Clave incorrecta.")
+    st.stop()
+
+
+_exigir_acceso()
 
 TIPOS_IMAGEN_ACEPTADOS = ["jpg", "jpeg", "png", "webp", "avif"]
 
