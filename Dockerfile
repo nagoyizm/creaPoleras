@@ -11,7 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgl1 \
     libglib2.0-0 \
-    fonts-dejavu-core \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,6 +23,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Pre-descargar modelo u2net de rembg durante el build para evitar descargas en tiempo de ejecución en Contabo
 RUN python -c "import rembg; from PIL import Image; rembg.remove(Image.new('RGB', (16, 16)))"
+
+# Fuentes para el texto local de la mesa de composicion (despues de rembg para conservar la cache)
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copiar el resto del código del proyecto
 COPY . .
