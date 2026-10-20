@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Pre-descargar modelo u2net de rembg durante el build para evitar descargas en tiempo de ejecución en Contabo
-RUN python -c "import rembg; from PIL import Image; rembg.remove(Image.new('RGB', (16, 16)))"
+RUN python -c "import rembg; from PIL import Image; rembg.remove(Image.new('RGB', (512, 512)))"
 
 # Fuentes para el texto local de la mesa de composicion (despues de rembg para conservar la cache)
 RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
