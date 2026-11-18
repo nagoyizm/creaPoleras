@@ -10,6 +10,9 @@ services:
     volumes:
       # Persistencia de los modelos de rembg (u2net) para evitar re-descargas
       - u2net-models:/root/.u2net
+      # Persistencia de disenos guardados y memoria de aprendizajes (sobreviven a los redeploys)
+      - ./salidas:/app/salidas
+      - ./datos:/app/datos
 
 volumes:
   u2net-models:

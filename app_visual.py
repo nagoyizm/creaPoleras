@@ -9,6 +9,7 @@ Correr con:
 import io
 import os
 import sys
+import shutil
 import hmac
 import time
 import json
@@ -102,6 +103,31 @@ st.markdown(
 )
 
 
+def reiniciar_todo(limpiar_disco: bool = True):
+    """Reinicia todo el formulario, resetea los archivos subidos y limpia caches y resultados."""
+    st.session_state.uploader_reset_id = st.session_state.get("uploader_reset_id", 0) + 1
+    claves_a_borrar = [
+        "ultimo", "historial", "cache_analisis", "cache_hash",
+        "mesa_layout", "mesa_recortes", "mesa_urls", "mesa_rec_clave",
+        "mesa_clave", "mesa_cajas", "mesa_fondos", "mesa_reset",
+        "impresion", "instr_edicion", "correccion_urgente", "ejecutar_regeneracion",
+        "cache_recortes_base", "recortes_depurados",
+    ]
+    for k in claves_a_borrar:
+        st.session_state.pop(k, None)
+    st.session_state.lista_colores = ["#FF3EA5"]
+    if limpiar_disco and DIR_SALIDAS.exists():
+        for item in DIR_SALIDAS.iterdir():
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                elif item.is_file():
+                    item.unlink(missing_ok=True)
+            except Exception:
+                pass
+    st.rerun()
+
+
 def _calcular_hash_archivos(archivos) -> str:
     """Hash MD5 del CONTENIDO de los archivos (no solo nombre y tamaño) para saber si cambiaron."""
     if not archivos:
@@ -177,6 +203,8 @@ def _registrar_version(resultado: Image.Image, meta: dict) -> dict:
         "tokens": resultado.info.get("registro_tokens", {}),
         "tiempo": resultado.info.get("tiempo_total_segundos", 0),
         "ratio": resultado.info.get("ratio_str", "3:4"),
+        "fondo": resultado.info.get("diagnostico_fondo") or {},
+        "ref_recortada": resultado.info.get("referencia_recortada", 0),
         **meta,
     }
     historial = st.session_state.setdefault("historial", [])
@@ -279,16 +307,69 @@ with st.sidebar:
     else:
         st.caption("ℹ️ No hay análisis en caché aún. Se creará al generar el primer diseño.")
 
+    st.divider()
+    st.subheader("🧹 Reiniciar y Limpiar")
+    st.caption("Restablece el estado de la aplicación y limpia fotos o resultados.")
+    borrar_disco_chk = st.checkbox(
+        "Borrar también carpeta salidas/ (diseños guardados en disco)",
+        value=False,
+        help="Marcado: además borra del disco TODOS los diseños guardados de sesiones anteriores. Desmarcado: solo limpia la pantalla, las fotos subidas y las cachés.",
+    )
+    if st.button("🔄 Reiniciar Proceso y Limpiar Imágenes", type="secondary", use_container_width=True):
+        reiniciar_todo(limpiar_disco=borrar_disco_chk)
 
-st.title("👕 Generador de diseños de poleras")
-st.caption("Sube referencias, tu personaje, elige colores y texto — Gemini arma el diseño con monitoreo en vivo.")
+    st.divider()
+    st.subheader("🧠 Memoria de Aprendizaje")
+    aprendizajes_lista = generador.cargar_aprendizajes()
+    activas_cnt = sum(1 for a in aprendizajes_lista if a.get("activa", True))
+    st.caption(f"Lecciones aprendidas activas: **{activas_cnt}/{len(aprendizajes_lista)}**")
+    with st.expander("Ver y administrar reglas aprendidas", expanded=False):
+        if not aprendizajes_lista:
+            st.info("Aún no hay reglas registradas.")
+        for ap in aprendizajes_lista:
+            c_chk, c_del = st.columns([4, 1])
+            with c_chk:
+                act = st.checkbox(
+                    f"**{ap.get('categoria', 'Regla')}**: {ap.get('comentario', '')[:45]}",
+                    value=ap.get("activa", True),
+                    key=f"sidebar_ap_{ap['id']}",
+                )
+                if act != ap.get("activa", True):
+                    generador.conmutar_aprendizaje(ap["id"], act)
+                    st.rerun()
+            with c_del:
+                if st.button("✕", key=f"del_ap_{ap['id']}", help="Eliminar regla"):
+                    generador.eliminar_aprendizaje(ap["id"])
+                    st.rerun()
+            st.caption(f"Prompt: `{ap.get('regla_prompt', '')}`")
+            st.markdown("---")
+
+        with st.popover("➕ Agregar regla manual"):
+            nueva_cat = st.selectbox("Categoría", ["Textos", "Sujeto", "Referencia", "Fondo", "General"], key="cat_manual")
+            nuevo_txt = st.text_input("Instrucción o directriz:", key="txt_manual")
+            if st.button("Guardar regla", key="btn_manual"):
+                if nuevo_txt.strip():
+                    generador.guardar_aprendizaje(nuevo_txt, categoria=nueva_cat)
+                    st.success("Regla guardada.")
+                    st.rerun()
+
+
+col_tit, col_rst = st.columns([4, 1])
+with col_tit:
+    st.title("👕 Generador de diseños de poleras")
+    st.caption("Sube referencias, tu personaje, elige colores y texto — Gemini arma el diseño con monitoreo en vivo.")
+with col_rst:
+    st.write("")
+    if st.button("🧹 Limpiar todo", help="Reinicia el formulario, vacía imágenes subidas y caché"):
+        reiniciar_todo(limpiar_disco=False)
 
 # --- Imagen(es) de referencia ---
 st.subheader("1. Imagen(es) de referencia (estructura del diseño)")
+uploader_id = st.session_state.get("uploader_reset_id", 0)
 archivos_referencia = st.file_uploader(
     "Sube una o más poleras existentes cuyo layout/estructura quieres replicar",
     type=TIPOS_IMAGEN_ACEPTADOS,
-    key="referencia",
+    key=f"referencia_{uploader_id}",
     accept_multiple_files=True,
 )
 st.caption("Si subes varias, Gemini combina lo común entre ellas en una sola estructura.")
@@ -311,15 +392,154 @@ with col_suj2:
 archivos_personaje = st.file_uploader(
     "Sube una o más fotos del sujeto que va en la polera",
     type=TIPOS_IMAGEN_ACEPTADOS,
-    key="personaje",
+    key=f"personaje_{uploader_id}",
     accept_multiple_files=True,
 )
 st.caption("Puedes subir varias fotos del mismo sujeto (distintos ángulos ayudan a que salga más reconocible).")
-recortar_personaje = st.checkbox(
-    "Recortar solo al personaje/sujeto (quitar fondo)",
-    value=True,
-    help="Si lo desmarcas, se usa la(s) foto(s) completa(s) tal cual, con su fondo original. Desmárcalo si tu servidor tiene poca memoria RAM.",
-)
+
+col_rec1, col_rec2 = st.columns(2)
+with col_rec1:
+    sujeto_ya_recortado = st.checkbox(
+        "✅ Mi sujeto ya viene recortado (PNG transparente / sin fondo)",
+        value=False,
+        help="Marca esto si tu imagen ya es un PNG sin fondo (ej. recortado en Photoshop o Canva). Se omitirá rembg para conservar 100% la nitidez y los bordes originales.",
+    )
+with col_rec2:
+    recortar_personaje = st.checkbox(
+        "Recortar solo al personaje/sujeto (quitar fondo con IA)",
+        value=not sujeto_ya_recortado,
+        disabled=sujeto_ya_recortado,
+        help="Si la foto tiene fondo y quieres que el programa lo recorte automáticamente. Desmárcalo si quieres usar la foto completa con su fondo original.",
+    )
+
+umbral_alfa = 15
+reducir_halos = 0
+recortes_depurados_usuario = []
+
+if archivos_personaje:
+    transparentes_detectados = []
+    for a in archivos_personaje:
+        try:
+            im_temp = Image.open(a)
+            if generador.es_imagen_ya_recortada(im_temp):
+                transparentes_detectados.append(a.name)
+        except Exception:
+            pass
+    if transparentes_detectados and not sujeto_ya_recortado:
+        st.info(f"💡 Detectamos fondo transparente en: **{', '.join(transparentes_detectados)}**. Se recomienda marcar 'Mi sujeto ya viene recortado' para conservar sus bordes exactos.")
+
+    if recortar_personaje or sujeto_ya_recortado:
+        st.markdown("#### ✂️ Vista previa y depuración de recorte del sujeto (0 tokens • Local en tu PC)")
+        st.caption("Inspecciona cómo quedó recortado cada sujeto antes de generar la polera. Si ves halos claros sobre oscuro o bordes indeseados, depúralos con los controles.")
+
+        col_dep1, col_dep2, col_dep3 = st.columns([2, 2, 2])
+        with col_dep1:
+            fondo_preview = st.selectbox(
+                "Fondo de inspección",
+                [
+                    "Ajedrezado transparente",
+                    "Fondo oscuro (#181818)",
+                    "Fondo blanco (#FFFFFF)",
+                    "Transparente puro (PNG)",
+                ],
+                index=0,
+                key="fondo_preview_sujeto",
+                help="Cambia el fondo de la vista previa para ver si quedan halos claros sobre fondo oscuro o sombras oscuras sobre blanco.",
+            )
+        with col_dep2:
+            umbral_alfa = st.slider(
+                "Tolerancia / Umbral alfa",
+                min_value=1,
+                max_value=80,
+                value=15,
+                step=1,
+                key="umbral_alfa_slider",
+                help="Valores más altos eliminan ruido o niebla semitransparente residual en los bordes.",
+            )
+        with col_dep3:
+            reducir_halos = st.slider(
+                "Reducción de halos (erosión)",
+                min_value=0,
+                max_value=3,
+                value=0,
+                step=1,
+                key="reducir_halos_slider",
+                help="Encoge 1, 2 o 3 píxeles el contorno. Ideal si queda un fino reborde del color del fondo original.",
+            )
+
+        cache_base = st.session_state.setdefault("cache_recortes_base", {})
+
+        # Procesamiento y visualización de cada imagen recortada
+        if len(archivos_personaje) == 1:
+            arch = archivos_personaje[0]
+            h_arch = hashlib.md5(arch.getvalue()).hexdigest() + ("_pre" if sujeto_ya_recortado else "_rembg")
+            if h_arch not in cache_base:
+                with st.spinner("Generando recorte local inicial..."):
+                    img_raw = Image.open(arch)
+                    img_raw.load()
+                    cache_base[h_arch] = generador.obtener_recorte_base(img_raw, ya_recortado=sujeto_ya_recortado)
+            base_recorte = cache_base[h_arch]
+            corte_dep = generador.depurar_recorte(
+                base_recorte, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos, recortar_caja=True
+            )
+            recortes_depurados_usuario.append(corte_dep)
+            prev_vis = generador.componer_preview_fondo(corte_dep, modo_fondo=fondo_preview)
+
+            c_orig, c_cort = st.columns(2)
+            with c_orig:
+                st.markdown(f"**📸 Foto original:** `{arch.name}`")
+                st.image(arch, use_container_width=True)
+            with c_cort:
+                st.markdown(f"**✨ Recorte depurado ({corte_dep.width}×{corte_dep.height}px):**")
+                st.image(prev_vis, use_container_width=True)
+                buf_dl = io.BytesIO()
+                corte_dep.save(buf_dl, format="PNG")
+                st.download_button(
+                    "💾 Descargar silueta PNG transparente",
+                    data=buf_dl.getvalue(),
+                    file_name=f"recorte_{arch.name.rsplit('.', 1)[0]}.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
+        else:
+            tabs_sujetos = st.tabs([f"Imagen {i+1}: {a.name[:18]}" for i, a in enumerate(archivos_personaje)])
+            for i, arch in enumerate(archivos_personaje):
+                h_arch = hashlib.md5(arch.getvalue()).hexdigest() + ("_pre" if sujeto_ya_recortado else "_rembg")
+                if h_arch not in cache_base:
+                    with st.spinner(f"Generando recorte local de imagen #{i+1}..."):
+                        img_raw = Image.open(arch)
+                        img_raw.load()
+                        cache_base[h_arch] = generador.obtener_recorte_base(img_raw, ya_recortado=sujeto_ya_recortado)
+                base_recorte = cache_base[h_arch]
+                corte_dep = generador.depurar_recorte(
+                    base_recorte, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos, recortar_caja=True
+                )
+                recortes_depurados_usuario.append(corte_dep)
+                prev_vis = generador.componer_preview_fondo(corte_dep, modo_fondo=fondo_preview)
+
+                with tabs_sujetos[i]:
+                    c_orig, c_cort = st.columns(2)
+                    with c_orig:
+                        st.markdown(f"**📸 Foto original #{i+1}:** `{arch.name}`")
+                        st.image(arch, use_container_width=True)
+                    with c_cort:
+                        st.markdown(f"**✨ Recorte depurado #{i+1} ({corte_dep.width}×{corte_dep.height}px):**")
+                        st.image(prev_vis, use_container_width=True)
+                        buf_dl = io.BytesIO()
+                        corte_dep.save(buf_dl, format="PNG")
+                        st.download_button(
+                            f"💾 Descargar silueta #{i+1} PNG",
+                            data=buf_dl.getvalue(),
+                            file_name=f"recorte_{arch.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png",
+                            key=f"dl_corte_indiv_{i}",
+                            use_container_width=True,
+                        )
+
+        st.session_state.recortes_depurados = recortes_depurados_usuario
+    else:
+        st.info("ℹ️ Has desactivado el recortador automático. Las fotos se usarán completas con su fondo original.")
+        st.session_state.recortes_depurados = None
 
 # --- Colores ---
 st.subheader("3. Colores a usar")
@@ -371,12 +591,25 @@ else:
 
 # --- Textos ---
 st.subheader("4. Textos")
-titulo = st.text_input("Título principal", placeholder="ej: MI GRUPO")
-tamano_titulo = st.select_slider(
-    "Tamaño del título",
-    options=["chico", "mediano", "grande"],
-    value="grande",
+
+sin_titulo = st.checkbox(
+    "🚫 No incluir título principal (diseño solo con ilustraciones o frases)",
+    value=False,
+    help="Marca esto si quieres un diseño limpio sin tipografía grande o título dominante. La IA no dibujará títulos inventados.",
 )
+
+if not sin_titulo:
+    titulo = st.text_input("Título principal", placeholder="ej: MI GRUPO")
+    tamano_titulo = st.select_slider(
+        "Tamaño del título",
+        options=["chico", "mediano", "grande"],
+        value="grande",
+    )
+else:
+    titulo = ""
+    tamano_titulo = "mediano"
+    st.info("ℹ️ El diseño se generará **sin título principal**, enfocando todo el espacio en las ilustraciones y el estilo gráfico.")
+
 frases_sueltas_texto = st.text_input(
     "Frases sueltas pequeñas (separadas por coma)",
     placeholder="ej: WORLD TOUR, 2026",
@@ -421,7 +654,7 @@ def _aplicar_valor_mesa(layout: list[dict], capas_val: list[dict]) -> list[dict]
     return resultado
 
 
-def _seccion_mesa(archivos_ref, archivos_pers, recortar, titulo, frases, ratio_wh, color_fondo_solido):
+def _seccion_mesa(archivos_ref, archivos_pers, recortar, ya_recortado, titulo, frases, ratio_wh, color_fondo_solido, umbral_alfa=15, reducir_halos=0):
     """
     Dibuja la mesa de composición y devuelve (layout, modo_guia, texto_local, config_texto, recortes).
     El layout vive en st.session_state.mesa_layout.
@@ -431,22 +664,27 @@ def _seccion_mesa(archivos_ref, archivos_pers, recortar, titulo, frases, ratio_w
     color_texto = _contraste(color_fondo_solido) if color_fondo_solido else "#FFFFFF"
 
     # 1. Recortes del sujeto (locales y gratis), cacheados por contenido
-    clave_rec = (hash_pers, bool(recortar))
-    if st.session_state.get("mesa_rec_clave") != clave_rec:
+    clave_rec = (hash_pers, bool(recortar), bool(ya_recortado), umbral_alfa, reducir_halos)
+    recortes_dep = st.session_state.get("recortes_depurados")
+    if recortes_dep and len(recortes_dep) == len(archivos_pers) and (recortar or ya_recortado):
+        st.session_state.mesa_recortes = recortes_dep
+        st.session_state.mesa_urls = [_a_data_url(r, 420) for r in recortes_dep]
+        st.session_state.mesa_rec_clave = clave_rec
+    elif st.session_state.get("mesa_rec_clave") != clave_rec:
         recortes = []
-        with st.spinner("Recortando el fondo de tus imágenes (local, sin costo)..."):
+        with st.spinner("Procesando silueta de tus imágenes (local, sin costo)..."):
             for a in archivos_pers:
                 img = Image.open(a)
                 img.load()
                 try:
-                    if recortar:
-                        rec = recortar_sujeto(img)
-                        caja = rec.getchannel("A").getbbox()
-                        recortes.append(rec.crop(caja) if caja else rec)
+                    if ya_recortado:
+                        recortes.append(generador.recortar_sujeto(img, ya_recortado=True, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos))
+                    elif recortar:
+                        recortes.append(generador.recortar_sujeto(img, ya_recortado=False, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos))
                     else:
                         recortes.append(generador._redimensionar_si_es_muy_grande(img.convert("RGBA")))
                 except Exception as e:
-                    st.warning(f"No se pudo recortar '{a.name}' ({e}). Se usa la imagen completa.")
+                    st.warning(f"No se pudo procesar '{a.name}' ({e}). Se usa la imagen completa.")
                     recortes.append(generador._redimensionar_si_es_muy_grande(img.convert("RGBA")))
         st.session_state.mesa_recortes = recortes
         st.session_state.mesa_urls = [_a_data_url(r, 420) for r in recortes]
@@ -470,7 +708,7 @@ def _seccion_mesa(archivos_ref, archivos_pers, recortar, titulo, frases, ratio_w
     fondo_url, ref_img = fondos[hash_ref]
 
     # 3. Layout inicial (se rearma solo si cambian imágenes, referencia o proporción)
-    clave = (hash_pers, hash_ref, ratio_wh, bool(recortar))
+    clave = (hash_pers, hash_ref, ratio_wh, bool(recortar), bool(ya_recortado))
     cajas_guardadas = st.session_state.setdefault("mesa_cajas", {})
     if st.session_state.get("mesa_clave") != clave:
         st.session_state.mesa_layout = composicion.layout_inicial(
@@ -585,12 +823,13 @@ usar_mesa = st.checkbox(
 )
 layout_final, modo_guia, texto_local, config_texto, recortes_pre = None, "reilustrar", False, None, None
 if usar_mesa:
-    if not archivos_referencia or not archivos_personaje or not (titulo or "").strip():
-        st.info("Sube la referencia (paso 1), las imágenes del sujeto (paso 2) y escribe el título (paso 4) para armar la composición.")
+    if not archivos_referencia or not archivos_personaje or (not sin_titulo and not (titulo or "").strip()):
+        st.info("Sube la referencia (paso 1) y las fotos del sujeto (paso 2) para armar la composición.")
     else:
         layout_final, modo_guia, texto_local, config_texto, recortes_pre = _seccion_mesa(
-            archivos_referencia, archivos_personaje, recortar_personaje,
-            titulo.strip(), frases_sueltas, ratio_wh, color_fondo_solido,
+            archivos_referencia, archivos_personaje, recortar_personaje, sujeto_ya_recortado,
+            titulo.strip() if not sin_titulo else "", frases_sueltas, ratio_wh, color_fondo_solido,
+            umbral_alfa=umbral_alfa, reducir_halos=reducir_halos,
         )
 
 # --- Ajustes avanzados opcionales de diseño y pose ---
@@ -733,11 +972,16 @@ st.caption("Lite es lo más barato para probar variantes rápido. Pro da mejor c
 st.divider()
 
 # --- Botón de generación con consola interactiva ---
-if st.button("✨ Generar diseño", type="primary", use_container_width=True):
+generar_click = st.button("✨ Generar diseño", type="primary", use_container_width=True)
+debe_generar = generar_click or st.session_state.get("ejecutar_regeneracion", False)
+
+if debe_generar:
+    correccion_inmediata = st.session_state.pop("correccion_urgente", "")
+    st.session_state.ejecutar_regeneracion = False
     if not archivos_referencia or not archivos_personaje:
         st.error("Necesitas subir al menos una imagen de referencia y al menos una foto del personaje o sujeto.")
-    elif not titulo or not titulo.strip():
-        st.error("Escribe al menos el título principal.")
+    elif not sin_titulo and (not titulo or not titulo.strip()):
+        st.error("Escribe al menos el título principal (o marca la casilla 'No incluir título principal' en el Paso 4).")
     else:
         # Contenedor dinámico de la consola en vivo
         consola_placeholder = st.empty()
@@ -754,6 +998,9 @@ if st.button("✨ Generar diseño", type="primary", use_container_width=True):
                 "estado": estado,
             })
             renderizar_consola(consola_placeholder, logs_sesion, etapa_num, total_etapas, estado)
+
+        if correccion_inmediata:
+            callback_interfaz(1, 6, "Corrección", f"🚨 Aplicando corrección urgente del usuario: {correccion_inmediata[:60]}...", "info", {})
 
         imagenes_referencia = [Image.open(archivo) for archivo in archivos_referencia]
         imagenes_personaje = [Image.open(archivo) for archivo in archivos_personaje]
@@ -772,6 +1019,8 @@ if st.button("✨ Generar diseño", type="primary", use_container_width=True):
             if st.session_state.get("cache_hash") == hash_actual:
                 cache_a_usar = st.session_state.cache_analisis
 
+        recortes_a_usar = recortes_pre if (usar_mesa and recortes_pre) else st.session_state.get("recortes_depurados")
+
         try:
             resultado = generar_diseno_desde_imagenes(
                 imagenes_referencia=imagenes_referencia,
@@ -779,7 +1028,7 @@ if st.button("✨ Generar diseño", type="primary", use_container_width=True):
                 recortar_personaje=recortar_personaje,
                 usar_colores_referencia=usar_colores_referencia,
                 colores=st.session_state.lista_colores,
-                titulo=titulo.strip(),
+                titulo=titulo.strip() if not sin_titulo else "",
                 tamano_titulo=tamano_titulo,
                 frases_sueltas=frases_sueltas,
                 modelo_imagen=MODELOS_IMAGEN[nombre_modelo],
@@ -806,7 +1055,12 @@ if st.button("✨ Generar diseño", type="primary", use_container_width=True):
                 modo_guia=modo_guia,
                 texto_local=bool(usar_mesa and texto_local),
                 config_texto=config_texto if (usar_mesa and texto_local) else None,
-                recortes_precalculados=recortes_pre if usar_mesa else None,
+                recortes_precalculados=recortes_a_usar,
+                sujeto_ya_recortado=sujeto_ya_recortado,
+                correccion_inmediata=correccion_inmediata,
+                sin_titulo=sin_titulo,
+                umbral_alfa=umbral_alfa,
+                reducir_halos=reducir_halos,
             )
 
             # Guardar análisis en caché para reutilizar en siguientes intentos
@@ -815,7 +1069,7 @@ if st.button("✨ Generar diseño", type="primary", use_container_width=True):
                 st.session_state.cache_hash = hash_actual
 
             _registrar_version(resultado, {
-                "titulo": titulo.strip(),
+                "titulo": titulo.strip() if not sin_titulo else "(Sin título)",
                 "modelo": nombre_modelo,
                 "nota": "Generación inicial",
                 "solid": color_fondo_solido,
@@ -869,6 +1123,12 @@ def _mostrar_ultimo():
         base.alpha_composite(img.convert("RGBA"))
         vista = base.convert("RGB")
     st.image(vista, caption="Diseño final de polera", use_container_width=True)
+
+    aviso_fondo = (ult.get("fondo") or {}).get("aviso")
+    if aviso_fondo:
+        st.warning(f"⚠️ Transparencia: {aviso_fondo}")
+    if ult.get("ref_recortada"):
+        st.caption("✂️ La referencia era la foto de una prenda: se envió a la IA solo el estampado, sin la polera.")
 
     reg_tokens = ult.get("tokens", {})
     col_m1, col_m2, col_m3, col_m4 = st.columns(4)
@@ -945,6 +1205,52 @@ def _mostrar_ultimo():
                 st.rerun()
             except ErrorProcesoPolera as err:
                 _panel_error(err)
+
+    st.divider()
+    st.markdown("### 💬 ¿Qué cosas salieron mal en este diseño? (Retroalimentación y Aprendizaje)")
+    st.caption("Enseña al programa qué falló para que Gemini aprenda. Puedes corregir y regenerar de inmediato o guardar la regla para siempre en memoria.")
+
+    col_fb1, col_fb2 = st.columns([3, 2])
+    with col_fb1:
+        comentario_error = st.text_area(
+            "Describe qué cosas salieron mal o qué debe corregir la IA:",
+            placeholder="ej: Inventó palabras en inglés que no pedí / El fondo tiene sombras verdes / El personaje perdió los lentes / Dibujó dinosaurios que venían de la referencia...",
+            height=85,
+            key=f"fb_comentario_{ult['id']}",
+        )
+    with col_fb2:
+        cat_error = st.selectbox(
+            "Categoría del problema",
+            [
+                "Textos / Tipografía inventada",
+                "Contaminación de la referencia (elementos ajenos)",
+                "Fidelidad del sujeto / Rasgos",
+                "Fondo / Transparencia / Sombras",
+                "Colores / Estilo visual",
+                "Formato / Mockup no deseado",
+                "Otro / General",
+            ],
+            key=f"fb_cat_{ult['id']}",
+        )
+
+    col_fb_btn1, col_fb_btn2 = st.columns(2)
+    with col_fb_btn1:
+        if st.button("🧠 Guardar como aprendizaje permanente", use_container_width=True, help="Guarda esta regla en la memoria del programa (aprendizajes.json) para que aplique a todos los futuros diseños."):
+            if not comentario_error.strip():
+                st.warning("Escribe primero qué salió mal en el diseño.")
+            else:
+                nueva_r = generador.guardar_aprendizaje(comentario_error, categoria=cat_error)
+                st.success(f"✅ ¡Lección aprendida y guardada! Se aplicará automáticamente a todos los diseños futuros.")
+                st.rerun()
+
+    with col_fb_btn2:
+        if st.button("🔄 Corregir y Regenerar ahora con este feedback", type="primary", use_container_width=True, help="Vuelve a generar el diseño aplicando esta corrección como directriz urgente de máxima prioridad."):
+            if not comentario_error.strip():
+                st.warning("Escribe qué debe corregir antes de regenerar.")
+            else:
+                st.session_state.correccion_urgente = comentario_error.strip()
+                st.session_state.ejecutar_regeneracion = True
+                st.rerun()
 
     historial = st.session_state.get("historial", [])
     if len(historial) > 1:

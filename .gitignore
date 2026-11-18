@@ -25,3 +25,7 @@ files.zip
 .vscode/
 .idea/
 salidas/
+
+# Datos del usuario (aprendizajes): viven en cada maquina, no en git
+datos/
+aprendizajes.json

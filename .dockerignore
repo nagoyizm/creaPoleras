@@ -13,3 +13,5 @@ files.zip
 .DS_Store
 Thumbs.db
 salidas/
+datos/
+aprendizajes.json

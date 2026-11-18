@@ -321,10 +321,15 @@ def analizar_referencias(
     REGLAS ESTRICTAS DE ADAPTACIÓN:
     1. La imagen de referencia tiene un tema anterior (viejo) que DEBES IGNORAR COMPLETAMENTE. NUNCA transcribas palabras, frases, lemas ni textos que veas en la foto de referencia (como memes, lemas o marcas).
     2. NUNCA menciones los objetos, animales, fósiles, bandas o temas antiguos de la foto de referencia. Toda la descripción técnica debe estar redactada en función de cómo ilustrar "{sujeto_nombre}".
-    3. Responde EXCLUSIVAMENTE con un JSON válido con esta estructura:
+    3. Si una imagen es la foto de una prenda, en "areas_estampado" da, para esa imagen, el rectángulo (coordenadas normalizadas 0-1000) que encierra SOLO el estampado gráfico impreso, sin cuello, mangas, bordes de la prenda ni fondo. Si la imagen es arte plano o no hay prenda, deja "areas_estampado" como lista vacía.
+    4. Responde EXCLUSIVAMENTE con un JSON válido con esta estructura:
 
     {{
       "tipo_layout": "<'lamina_especimenes_catalogo' | 'collage_merch' | 'sujeto_central_hero' | 'vector_minimal' | 'poster_vintage'>",
+      "referencia_es_prenda": <true si alguna imagen es la FOTO de una polera/prenda (se ve cuello, mangas, tela, maniquí o persona vistiéndola) y no solo el arte plano; false si todas son arte plano>,
+      "areas_estampado": [
+        {{"imagen": <número de imagen, desde 1>, "box_2d": [<ymin>, <xmin>, <ymax>, <xmax>]}}
+      ],
       "cantidad_elementos_en_layout": <número entero: cuántas ilustraciones o retratos individuales componen la pieza, ej 1, 2, 3, 6, 8, 10, etc.>,
       "distribucion_elementos": [
         {{
@@ -549,28 +554,385 @@ def quitar_fondo_por_chroma(
     return Image.merge("RGBA", (r, g, b, canal_alpha))
 
 
+def _quitar_fondo_conectado(imagen: Image.Image, color_hex: str, tolerancia: float = 40.0, suavizado: float = 30.0) -> Image.Image:
+    """Quita un fondo de color uniforme, pero solo la parte conectada con el borde de la imagen.
+    Asi un blanco o un color parecido DENTRO del diseno (ojos, letras, huecos) se conserva."""
+    import numpy as np
+    from PIL import ImageFilter
+
+    rgb = imagen.convert("RGB")
+    arr = np.asarray(rgb).astype(np.float32)
+    h = color_hex.lstrip("#")
+    objetivo = np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=np.float32)
+    dist = np.sqrt(((arr - objetivo) ** 2).sum(axis=2))
+    rampa = np.clip((dist - tolerancia) / suavizado, 0, 1)
+    candidato = dist < (tolerancia + suavizado)
+    try:
+        from scipy import ndimage
+        etiquetas, n = ndimage.label(candidato)
+        en_borde = np.unique(np.concatenate([etiquetas[0], etiquetas[-1], etiquetas[:, 0], etiquetas[:, -1]]))
+        tabla = np.zeros(n + 1, dtype=bool)
+        tabla[en_borde[en_borde > 0]] = True
+        conectado = tabla[etiquetas]
+    except Exception:
+        conectado = candidato  # sin scipy: recorte global (comportamiento clasico)
+    alpha = np.where(conectado, rampa, 1.0) * 255
+    canal = Image.fromarray(alpha.astype("uint8"), mode="L").filter(ImageFilter.GaussianBlur(radius=1))
+    r, g, b = rgb.split()
+    return Image.merge("RGBA", (r, g, b, canal))
+
+
+def quitar_fondo_adaptativo(imagen: Image.Image, chroma_hex: str = "#00FF7F") -> tuple[Image.Image, dict]:
+    """Transparencia a prueba de fallos del modelo. Mide el color real del borde:
+    - verde croma esperado   -> chroma key clasico.
+    - otro fondo uniforme    -> se recorta ese color desde los bordes (blanco, crema, gris...).
+    - borde irregular/escena -> rembg local como plan B.
+    Devuelve (RGBA, diagnostico) con el metodo usado y el % de transparencia lograda."""
+    import numpy as np
+
+    rgb = imagen.convert("RGB")
+    arr = np.asarray(rgb).astype(np.float32)
+    g = max(2, int(min(arr.shape[:2]) * 0.02))
+    anillo = np.concatenate([
+        arr[:g].reshape(-1, 3), arr[-g:].reshape(-1, 3),
+        arr[:, :g].reshape(-1, 3), arr[:, -g:].reshape(-1, 3),
+    ])
+    mediana = np.median(anillo, axis=0)
+    homogeneidad = float((np.sqrt(((anillo - mediana) ** 2).sum(axis=1)) < 40).mean())
+    hx = chroma_hex.lstrip("#")
+    esperado = np.array([int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)], dtype=np.float32)
+    es_croma = float(np.sqrt(((mediana - esperado) ** 2).sum())) < 70
+    color_detectado = "#%02X%02X%02X" % tuple(int(round(v)) for v in mediana)
+    diag = {"homogeneidad_borde": round(homogeneidad, 2), "color_fondo_detectado": color_detectado}
+
+    if homogeneidad >= 0.85 and es_croma:
+        resultado = quitar_fondo_por_chroma(rgb, chroma_hex)
+        diag["metodo"] = "croma"
+    elif homogeneidad >= 0.85:
+        resultado = _quitar_fondo_conectado(rgb, color_detectado)
+        diag["metodo"] = "fondo_uniforme"
+        diag["aviso"] = (f"El modelo no usó el verde croma (el fondo salió {color_detectado}); "
+                         "se recortó ese fondo desde los bordes. Revisa los bordes del diseño.")
+    else:
+        try:
+            buf = io.BytesIO()
+            rgb.save(buf, format="PNG")
+            resultado = Image.open(io.BytesIO(_quitar_fondo_rembg(buf.getvalue()))).convert("RGBA")
+            diag["metodo"] = "rembg"
+            diag["aviso"] = ("El fondo generado no era uniforme (el modelo dibujó una escena o prenda); "
+                             "se recortó con IA local. Puede comerse detalles: conviene regenerar.")
+        except Exception as e:
+            resultado = quitar_fondo_por_chroma(rgb, chroma_hex)
+            diag["metodo"] = "croma_forzado"
+            diag["aviso"] = f"El fondo no era uniforme y el recorte local falló ({e}). Regenera el diseño."
+
+    alfa = np.asarray(resultado.split()[-1])
+    diag["transparente_pct"] = round(float((alfa < 20).mean()) * 100, 1)
+    if diag["transparente_pct"] < 3 and "aviso" not in diag:
+        diag["aviso"] = "Casi no hay transparencia: el modelo no dejó un fondo limpio. Regenera el diseño."
+    return resultado, diag
+
+
+def aislar_estampado(imagen: Image.Image, box_2d, margen: float = 0.02) -> Image.Image:
+    """Recorta la foto de una polera al rectangulo del estampado (box_2d = [ymin,xmin,ymax,xmax] en 0-1000).
+    Si el rectangulo es absurdo (muy chico o casi toda la foto), devuelve la imagen sin tocar."""
+    try:
+        ymin, xmin, ymax, xmax = [max(0.0, min(1000.0, float(v))) for v in box_2d]
+    except Exception:
+        return imagen
+    if ymax <= ymin or xmax <= xmin:
+        return imagen
+    fraccion = ((ymax - ymin) * (xmax - xmin)) / 1_000_000
+    if fraccion < 0.06 or fraccion > 0.92:
+        return imagen
+    w, h = imagen.size
+    x0 = max(0, int((xmin / 1000 - margen) * w)); x1 = min(w, int((xmax / 1000 + margen) * w))
+    y0 = max(0, int((ymin / 1000 - margen) * h)); y1 = min(h, int((ymax / 1000 + margen) * h))
+    if min(x1 - x0, y1 - y0) < 96:
+        return imagen
+    return imagen.crop((x0, y0, x1, y1))
+
+
+def preparar_referencias_para_modelo(imagenes: list[Image.Image], analisis_ref: dict, lado: int = 1024) -> tuple[list[Image.Image], int]:
+    """Si la referencia es la foto de una prenda, deja solo el estampado (sin cuello, mangas ni tela).
+    Devuelve (imagenes listas, cuantas se recortaron)."""
+    cajas = {}
+    if analisis_ref.get("referencia_es_prenda"):
+        for a in analisis_ref.get("areas_estampado") or []:
+            try:
+                cajas[int(a.get("imagen", 0)) - 1] = a.get("box_2d")
+            except Exception:
+                continue
+    listas, recortadas = [], 0
+    for i, img in enumerate(imagenes):
+        rec = aislar_estampado(img, cajas[i]) if i in cajas else img
+        if rec is not img:
+            recortadas += 1
+        listas.append(_redimensionar_si_es_muy_grande(rec, lado))
+    return listas, recortadas
+
+
+# =============================================================================
+# Memoria de Aprendizaje y Retroalimentación Persistente
+# =============================================================================
+_RAIZ = Path(__file__).resolve().parent
+# Carpeta de datos del usuario (fuera de git; en Docker se monta como volumen para sobrevivir a los redeploys)
+DIR_DATOS = Path(os.getenv("DATOS_DIR", "") or (_RAIZ / "datos"))
+DIR_APRENDIZAJES = DIR_DATOS / "aprendizajes.json"
+_APRENDIZAJES_LEGADO = _RAIZ / "aprendizajes.json"   # ubicacion anterior: se migra una sola vez
+MAX_REGLAS_EN_PROMPT = 10   # ademas de las reglas base; evita que el prompt engorde sin limite
+
+REGLAS_BASE = [
+    {
+        "id": "regla_base_01", "fecha": "2026-11-18 00:00", "categoria": "Fondo / Formato",
+        "comentario": "Generar exclusivamente arte gráfico 2D plano, sin mockups de poleras, arrugas de tela ni modelos vistiendo ropa.",
+        "regla_prompt": "RESTRICCIÓN ABSOLUTA DE SALIDA: Generar ÚNICAMENTE el arte gráfico 2D plano, limpio y de frente. PROHIBIDO generar mockups de poleras, personas vistiendo ropa o texturas de tela con arrugas.",
+        "activa": True,
+    },
+    {
+        "id": "regla_base_02", "fecha": "2026-11-18 00:00", "categoria": "Textos / Tipografía",
+        "comentario": "No inventar textos en inglés ni palabras que no hayan sido proporcionadas por el usuario.",
+        "regla_prompt": "CONTROL TIPOGRÁFICO: PROHIBIDO inventar frases, palabras en inglés o lemas adicionales; ilustrar ÚNICAMENTE los textos indicados por el usuario con ortografía exacta.",
+        "activa": True,
+    },
+    {
+        "id": "regla_base_03", "fecha": "2026-11-18 00:00", "categoria": "Contaminación de la referencia",
+        "comentario": "Evitar dibujar objetos o temas de la referencia (fósiles, dinosaurios, bandas, logos) si no corresponden al sujeto actual.",
+        "regla_prompt": "AISLAMIENTO TEMÁTICO: La imagen de referencia es estrictamente una plantilla de estilo. PROHIBIDO incluir elementos, objetos o figuras de la referencia anterior en el diseño del sujeto actual.",
+        "activa": True,
+    },
+]
+
+
+def _escribir_aprendizajes(lista: list[dict]) -> None:
+    DIR_DATOS.mkdir(parents=True, exist_ok=True)
+    DIR_APRENDIZAJES.write_text(json.dumps(lista, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def seleccionar_reglas_para_prompt(aprendizajes: list[dict]) -> list[dict]:
+    """Reglas base activas + las MAX_REGLAS_EN_PROMPT lecciones activas mas recientes (la lista viene de la mas nueva a la mas vieja)."""
+    activas = [a for a in aprendizajes if a.get("activa", True)]
+    base = [a for a in activas if str(a.get("id", "")).startswith("regla_base_")]
+    otras = [a for a in activas if not str(a.get("id", "")).startswith("regla_base_")][:MAX_REGLAS_EN_PROMPT]
+    return base + otras
+
+
+def cargar_aprendizajes() -> list[dict]:
+    """Carga las lecciones y reglas acumuladas (datos/aprendizajes.json). La primera vez migra el archivo
+    antiguo de la raiz del proyecto o, si no hay, siembra las reglas base."""
+    if not DIR_APRENDIZAJES.exists():
+        try:
+            if _APRENDIZAJES_LEGADO.exists():
+                inicial = json.loads(_APRENDIZAJES_LEGADO.read_text(encoding="utf-8"))
+                inicial = inicial if isinstance(inicial, list) else list(REGLAS_BASE)
+            else:
+                inicial = list(REGLAS_BASE)
+            _escribir_aprendizajes(inicial)
+        except Exception:
+            return list(REGLAS_BASE)
+    try:
+        data = json.loads(DIR_APRENDIZAJES.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def guardar_aprendizaje(comentario: str, categoria: str = "General", regla_personalizada: str | None = None) -> dict:
+    """Guarda una nueva lección/regla aprendida para que aplique a futuras generaciones."""
+    aprendizajes = cargar_aprendizajes()
+    regla = regla_personalizada.strip() if regla_personalizada and regla_personalizada.strip() else f"CORRECCIÓN/EVITAR: {comentario.strip()}"
+    nueva = {
+        "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "categoria": categoria,
+        "comentario": comentario.strip(),
+        "regla_prompt": regla,
+        "activa": True,
+    }
+    aprendizajes.insert(0, nueva)
+    _escribir_aprendizajes(aprendizajes)
+    return nueva
+
+
+def eliminar_aprendizaje(id_regla: str) -> bool:
+    """Elimina una regla por su ID."""
+    aprendizajes = cargar_aprendizajes()
+    nuevos = [a for a in aprendizajes if a.get("id") != id_regla]
+    if len(nuevos) != len(aprendizajes):
+        _escribir_aprendizajes(nuevos)
+        return True
+    return False
+
+
+def conmutar_aprendizaje(id_regla: str, activa: bool) -> bool:
+    """Activa o desactiva una regla sin borrarla."""
+    aprendizajes = cargar_aprendizajes()
+    modificado = False
+    for a in aprendizajes:
+        if a.get("id") == id_regla:
+            a["activa"] = activa
+            modificado = True
+            break
+    if modificado:
+        _escribir_aprendizajes(aprendizajes)
+        return True
+    return False
+
+
+# =============================================================================
+# Recorte y Depuración de Silueta de Sujetos
+# =============================================================================
 _SESION_REMBG = None
 
 
-def _quitar_fondo_rembg(datos: bytes) -> bytes:
+def es_imagen_ya_recortada(imagen: Image.Image, umbral_pixeles: float = 0.03) -> bool:
+    """
+    Determina si una imagen ya tiene fondo transparente significativo (PNG/WebP recortado).
+    Evita aplicar rembg innecesariamente y previene degradación de bordes ya limpios.
+    """
+    if imagen.mode not in ("RGBA", "LA") and "transparency" not in imagen.info:
+        return False
+    rgba = imagen.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    min_a, max_a = alpha.getextrema()
+    if min_a >= 250:
+        return False
+    import numpy as np
+    arr = np.asarray(alpha)
+    pct_transparente = float((arr < 20).mean())
+    return pct_transparente >= umbral_pixeles
+
+
+def limpiar_bordes_alfa(
+    imagen_rgba: Image.Image,
+    umbral_corte: int = 15,
+    recortar_caja: bool = True,
+    reducir_halos: int = 0,
+) -> Image.Image:
+    """
+    Depura el canal alfa:
+    - Elimina píxeles fantasmas/ruido semitransparentes en el fondo.
+    - Reduce halos/fringing en los bordes si reducir_halos > 0 (usando erosión MinFilter).
+    - Recorta la imagen a su caja delimitadora (bounding box) real para que el sujeto
+      no quede empequeñecido con márgenes vacíos gigantes.
+    """
+    if imagen_rgba.mode != "RGBA":
+        imagen_rgba = imagen_rgba.convert("RGBA")
+    r, g, b, a = imagen_rgba.split()
+    import numpy as np
+    from PIL import ImageFilter
+    a_arr = np.asarray(a).copy()
+    if umbral_corte > 0:
+        a_arr[a_arr < umbral_corte] = 0
+    a_limpio = Image.fromarray(a_arr, mode="L")
+    for _ in range(max(0, int(reducir_halos))):
+        a_limpio = a_limpio.filter(ImageFilter.MinFilter(3))
+    limpia = Image.merge("RGBA", (r, g, b, a_limpio))
+    if recortar_caja:
+        caja = a_limpio.getbbox()
+        if caja:
+            w, h = limpia.size
+            caja_pad = (
+                max(0, caja[0] - 4),
+                max(0, caja[1] - 4),
+                min(w, caja[2] + 4),
+                min(h, caja[3] + 4),
+            )
+            limpia = limpia.crop(caja_pad)
+    return limpia
+
+
+def _quitar_fondo_rembg(datos: bytes, post_process: bool = True) -> bytes:
     """rembg con el modelo de REMBG_MODELO si esta definido (ej. u2net en el servidor, liviano);
-    si no, usa el modelo por defecto de la libreria."""
+    si no, usa el modelo por defecto de la libreria. Aplica post-procesamiento de mascara para cerrar huecos y quitar ruido."""
     from rembg import remove, new_session
     global _SESION_REMBG
     modelo = os.environ.get("REMBG_MODELO", "").strip()
+    kwargs = {}
+    if post_process:
+        kwargs["post_process_mask"] = True
     if not modelo:
-        return remove(datos)
+        return remove(datos, **kwargs)
     if _SESION_REMBG is None:
         _SESION_REMBG = new_session(modelo)
-    return remove(datos, session=_SESION_REMBG)
+    return remove(datos, session=_SESION_REMBG, **kwargs)
 
 
-def recortar_sujeto(imagen: Image.Image) -> Image.Image:
-    """Quita el fondo de una foto con rembg (local, gratis). Devuelve RGBA. Lanza excepción si falla."""
+def obtener_recorte_base(imagen: Image.Image, ya_recortado: bool = False) -> Image.Image:
+    """
+    Obtiene el recorte base sin post-procesamiento agresivo para poder depurarlo interactivamente
+    con sliders de umbral y reducción de halos a velocidad instantánea (0 tokens).
+    """
     reducida = _redimensionar_si_es_muy_grande(imagen, LADO_MAXIMO_PARA_RECORTE)
+    if ya_recortado or es_imagen_ya_recortada(reducida):
+        return reducida.convert("RGBA")
+
     buffer = io.BytesIO()
     reducida.save(buffer, format="PNG")
-    return Image.open(io.BytesIO(_quitar_fondo_rembg(buffer.getvalue()))).convert("RGBA")
+    corte_bytes = _quitar_fondo_rembg(buffer.getvalue(), post_process=True)
+    return Image.open(io.BytesIO(corte_bytes)).convert("RGBA")
+
+
+def depurar_recorte(
+    img_base: Image.Image,
+    umbral_alfa: int = 15,
+    reducir_halos: int = 0,
+    recortar_caja: bool = True,
+) -> Image.Image:
+    """Aplica parámetros de depuración de borde a un recorte base en ~5ms."""
+    return limpiar_bordes_alfa(
+        img_base,
+        umbral_corte=umbral_alfa,
+        recortar_caja=recortar_caja,
+        reducir_halos=reducir_halos,
+    )
+
+
+def recortar_sujeto(
+    imagen: Image.Image,
+    ya_recortado: bool = False,
+    umbral_alfa: int = 15,
+    reducir_halos: int = 0,
+) -> Image.Image:
+    """
+    Quita el fondo de una foto con rembg (local, gratis) o reutiliza el corte existente si ya_recortado es True.
+    Aplica depuración de bordes, eliminación de halos y auto-crop al bounding box.
+    Devuelve RGBA.
+    """
+    base = obtener_recorte_base(imagen, ya_recortado=ya_recortado)
+    return depurar_recorte(base, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos, recortar_caja=True)
+
+
+def componer_preview_fondo(
+    imagen_rgba: Image.Image,
+    modo_fondo: str = "Ajedrezado transparente",
+) -> Image.Image:
+    """
+    Monta una imagen RGBA sobre un fondo seleccionado para inspección visual clara de bordes y halos.
+    """
+    if imagen_rgba.mode != "RGBA":
+        imagen_rgba = imagen_rgba.convert("RGBA")
+    w, h = imagen_rgba.size
+    if modo_fondo == "Fondo oscuro (#181818)":
+        fondo = Image.new("RGBA", (w, h), (24, 24, 24, 255))
+        fondo.paste(imagen_rgba, (0, 0), imagen_rgba)
+        return fondo.convert("RGB")
+    elif modo_fondo == "Fondo blanco (#FFFFFF)":
+        fondo = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+        fondo.paste(imagen_rgba, (0, 0), imagen_rgba)
+        return fondo.convert("RGB")
+    elif modo_fondo == "Transparente puro (PNG)":
+        return imagen_rgba
+    else:  # "Ajedrezado transparente"
+        import numpy as np
+        tamano_cuadro = 16
+        x = np.arange(w) // tamano_cuadro
+        y = np.arange(h) // tamano_cuadro
+        tablero = (x[None, :] + y[:, None]) % 2
+        arr = np.where(tablero[:, :, None] == 0, np.array([215, 215, 215], dtype=np.uint8), np.array([255, 255, 255], dtype=np.uint8))
+        chk = Image.fromarray(arr, mode="RGB")
+        chk.paste(imagen_rgba, (0, 0), imagen_rgba)
+        return chk
 
 
 def _aplanar_sobre_color(imagen: Image.Image, color_hex: str = "#808080") -> Image.Image:
@@ -629,15 +991,20 @@ def _postprocesar(
     layout_texto: list[dict] | None = None,
     config_texto: dict | None = None,
     avisar=None,
+    diagnostico: dict | None = None,
 ) -> Image.Image:
-    """Chroma key (si no hay fondo sólido), reescalado final y, opcionalmente, texto local con fuentes reales."""
+    """Recorte de fondo (si no hay fondo sólido), reescalado final y, opcionalmente, texto local con fuentes reales."""
     avisar = avisar or (lambda m: None)
     if color_fondo_solido:
         imagen = imagen_base
         avisar("Fondo sólido conservado.")
     else:
-        imagen = quitar_fondo_por_chroma(imagen_base, COLOR_CHROMA_DEFECTO)
-        avisar("Fondo transparente aplicado vía chroma key.")
+        imagen, diag = quitar_fondo_adaptativo(imagen_base, COLOR_CHROMA_DEFECTO)
+        if diagnostico is not None:
+            diagnostico.update(diag)
+        avisar(f"Fondo transparente aplicado (método: {diag['metodo']}, {diag['transparente_pct']}% transparente).")
+        if diag.get("aviso"):
+            avisar("⚠️ " + diag["aviso"])
     imagen = imagen.resize((ancho_px, alto_px), Image.LANCZOS)
     if layout_texto:
         cfg = config_texto or {}
@@ -820,6 +1187,11 @@ def generar_diseno_desde_imagenes(
     texto_local: bool = False,
     config_texto: dict | None = None,
     recortes_precalculados: list[Image.Image] | None = None,
+    sujeto_ya_recortado: bool = False,
+    correccion_inmediata: str = "",
+    sin_titulo: bool = False,
+    umbral_alfa: int = 15,
+    reducir_halos: int = 0,
 ) -> Image.Image:
     """
     Genera el diseño completo combinando la plantilla abstracta de la referencia
@@ -862,13 +1234,15 @@ def generar_diseno_desde_imagenes(
             sugerencia="Sube al menos un archivo en el paso 1 y en el paso 2 de la interfaz.",
         )
 
-    if not titulo or not titulo.strip():
+    titulo_limpio = "" if sin_titulo else (titulo or "").strip()
+    if not sin_titulo and not titulo_limpio:
         raise ErrorProcesoPolera(
             fase="Validación Previa",
             mensaje="El título principal está vacío.",
-            diagnostico="El diseño necesita al menos un título para la tipografía central.",
-            sugerencia="Escribe un título en el campo de texto (Paso 4).",
+            diagnostico="El diseño necesita al menos un título para la tipografía central o activar la opción de no incluir título.",
+            sugerencia="Escribe un título en el campo de texto (Paso 4) o marca la casilla 'No incluir título principal'.",
         )
+    titulo = titulo_limpio
 
     client = obtener_cliente_gemini()
     _notificar_progreso(callback_progreso, 1, total_etapas, "Validación previa", "Imágenes y credenciales verificadas correctamente.", "success")
@@ -970,7 +1344,7 @@ def generar_diseno_desde_imagenes(
                 etapa_idx=3,
                 total_etapas=total_etapas,
             )
-            perfil_color = extraer_perfil_color(imagenes_referencia)
+            perfil_color = extraer_perfil_color(preparar_referencias_para_modelo(imagenes_referencia, analisis_ref)[0])
             registro_tokens["analisis_referencias"] = tokens_ref
             dt = round(time.time() - t0, 1)
             _notificar_progreso(
@@ -1008,31 +1382,38 @@ def generar_diseno_desde_imagenes(
     imagenes_personaje_final = []
 
     if recortes_precalculados:
-        _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", "Se reutilizan los recortes de la mesa de composición (0 costo).", "info")
+        _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", "Se reutilizan los recortes optimizados de la vista previa/mesa de composición (0 costo).", "info")
         imagenes_personaje_final = list(recortes_precalculados)
+    elif sujeto_ya_recortado:
+        _notificar_progreso(
+            callback_progreso, 4, total_etapas, "Recorte de Sujeto",
+            f"Preservando silueta original de {len(imagenes_personaje)} imagen(es) ya recortada(s) (sin rembg, máxima calidad)...",
+            "success",
+        )
+        for img in imagenes_personaje:
+            imagenes_personaje_final.append(recortar_sujeto(img, ya_recortado=True, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos))
+        dt = round(time.time() - t0, 1)
+        _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", f"Siluetas listas y depuradas ({dt}s).", "success")
     elif recortar_personaje:
         _notificar_progreso(
             callback_progreso, 4, total_etapas, "Recorte de Sujeto",
-            f"Recortando fondo de {len(imagenes_personaje)} imagen(es) de forma local (sin coste de tokens)...",
+            f"Recortando fondo de {len(imagenes_personaje)} imagen(es) con IA local y depuración de bordes...",
             "running",
         )
         try:
             for idx, img in enumerate(imagenes_personaje):
-                img_reducida = _redimensionar_si_es_muy_grande(img, LADO_MAXIMO_PARA_RECORTE)
-                buffer_entrada = io.BytesIO()
-                img_reducida.save(buffer_entrada, format="PNG")
                 try:
-                    resultado_recorte = _quitar_fondo_rembg(buffer_entrada.getvalue())
-                    imagenes_personaje_final.append(Image.open(io.BytesIO(resultado_recorte)))
+                    corte = recortar_sujeto(img, ya_recortado=False, umbral_alfa=umbral_alfa, reducir_halos=reducir_halos)
+                    imagenes_personaje_final.append(corte)
                 except Exception as err_rem:
                     _notificar_progreso(
                         callback_progreso, 4, total_etapas, "Recorte de Sujeto",
                         f"Aviso en recorte #{idx+1} ({err_rem}), usando imagen sin recortar para evitar detención...",
                         "warning",
                     )
-                    imagenes_personaje_final.append(img_reducida)
+                    imagenes_personaje_final.append(_redimensionar_si_es_muy_grande(img, LADO_MAXIMO_PARA_RECORTE))
             dt = round(time.time() - t0, 1)
-            _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", f"Recorte completado exitosamente ({dt}s).", "success")
+            _notificar_progreso(callback_progreso, 4, total_etapas, "Recorte de Sujeto", f"Recorte y depuración completados ({dt}s).", "success")
         except Exception as e:
             _notificar_progreso(
                 callback_progreso, 4, total_etapas, "Recorte de Sujeto",
@@ -1190,6 +1571,25 @@ def generar_diseno_desde_imagenes(
             "fotográfica del sujeto y la técnica artística de la referencia, adaptando texturas y luces."
         )
 
+    # Reglas aprendidas acumuladas (memoria persistente)
+    aprendizajes_activos = seleccionar_reglas_para_prompt(cargar_aprendizajes())
+    bloque_aprendizajes = ""
+    if aprendizajes_activos:
+        lineas_ap = []
+        for i, ap in enumerate(aprendizajes_activos):
+            lineas_ap.append(f"  * [Regla de Calidad #{i+1} - {ap.get('categoria', 'General')}]: {ap['regla_prompt']}")
+        bloque_aprendizajes = (
+            "\n### CONTROL DE CALIDAD Y LECCIONES APRENDIDAS DE ITERACIONES PREVIAS:\n"
+            "[El modelo DEBE aplicar estrictamente las siguientes reglas acumuladas para no repetir fallas pasadas]:\n"
+            + "\n".join(lineas_ap) + "\n"
+        )
+
+    if correccion_inmediata and correccion_inmediata.strip():
+        directrices_usuario.insert(
+            0,
+            f"- 🚨 CORRECCIÓN URGENTE DEL DISEÑO ANTERIOR: El usuario reportó el siguiente error que DEBE ser corregido estrictamente en esta nueva versión: {correccion_inmediata.strip()}"
+        )
+
     bloque_directrices_usuario = ""
     if directrices_usuario:
         bloque_directrices_usuario = (
@@ -1237,6 +1637,21 @@ def generar_diseno_desde_imagenes(
             "* NO DIBUJES NINGÚN TEXTO, LETRA, NÚMERO NI RÓTULO en la pieza (los textos se agregarán después con otra herramienta). "
             "Deja las ZONAS LIBRES DE TEXTO indicadas en la guía con el fondo o la ornamentación del estilo, sin letras ni garabatos que parezcan escritura."
         )
+    elif not titulo:
+        if frases_sueltas:
+            seccion_texto = (
+                f"3. TIPOGRAFÍA Y TEXTOS:\n"
+                f"- TÍTULO PRINCIPAL: OMITIDO POR EL USUARIO. PROHIBIDO dibujar títulos principales, nombres grandes o cabeceras en la pieza.\n"
+                f"- Textos secundarios / frases sueltas del usuario a incluir: {frases_texto} (Estilo tipográfico: {estilo_subtitulos}).\n"
+                f"* REGLA DE TEXTO: Dibuja ÚNICAMENTE las frases secundarias especificadas arriba. PROHIBIDO dibujar o inventar títulos principales, marcas, memes o frases de la referencia."
+            )
+        else:
+            seccion_texto = (
+                "3. TIPOGRAFÍA Y TEXTOS (PIEZA 100% LIBRE DE TEXTO):\n"
+                "* PROHIBICIÓN TOTAL DE TEXTO: El usuario especificó que este diseño NO lleva ningún título, palabra, frase, número ni rótulo. "
+                "La pieza debe estar compuesta EXCLUSIVAMENTE por arte gráfico, ilustraciones del sujeto y ornamentación visual del estilo. "
+                "PROHIBIDO dibujar títulos inventados, letras simuladas, caligrafía, marcas o palabras provenientes de la referencia."
+            )
     else:
         seccion_texto = f"""3. TIPOGRAFÍA Y TEXTOS (TEXTOS EXACTOS DEL USUARIO):
 - Título principal: "{titulo}" (tamaño {tamano_titulo})
@@ -1246,8 +1661,16 @@ def generar_diseno_desde_imagenes(
 - Textos secundarios / subtítulos: {frases_texto} (Estilo tipográfico: {estilo_subtitulos})
 * REGLA DE TEXTO: Dibuja ÚNICAMENTE los textos indicados por el usuario ("{titulo}" y frases secundarias especificadas). PROHIBIDO copiar o inventar frases ajenas (como textos de memes, fósiles o frases de la referencia). Ortografía exacta y tipografía nítida."""
 
+    bloque_prenda = ""
+    if analisis_ref.get("referencia_es_prenda"):
+        bloque_prenda = (
+            "\n- La imagen de referencia muestra un estampado sobre una prenda: toma de ella SOLO el estilo del estampado. "
+            "El color de la tela, su textura, arrugas, sombras de pliegues y la forma de la prenda NO son parte del diseño y no deben aparecer."
+        )
+
     prompt_final = f"""
 [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO PARA POLERA / T-SHIRT ARTWORK]
+{bloque_aprendizajes}
 {bloque_directrices_usuario}
 1. SUJETO ÚNICO Y EXCLUSIVO DE TODA LA ILUSTRACIÓN:
 - Sujeto objetivo a ilustrar: {sujeto_nombre}
@@ -1277,13 +1700,20 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
 - Tono e intensidad cromática: Saturación media {perfil_color['saturacion_promedio_pct']}% ({perfil_color['categoria_tono']}), atmósfera: {atmosfera_texto}.
 - Fondo: {instruccion_fondo}
 - RESTRICCIÓN DE SALIDA: Genera EXCLUSIVAMENTE el archivo de arte gráfico 2D plano, de frente, ocupando el lienzo completo. PROHIBIDO generar mockups de poleras, personas vistiendo ropa, pliegues de tela o fondos de estudio.
+- El resultado es SOLO el estampado (el arte que se imprimirá), nunca la prenda: sin silueta de polera, cuello, mangas, costuras, etiquetas ni color de tela, aunque la referencia sea la foto de una prenda.{bloque_prenda}
 """
 
     ancho_px, alto_px = DIMENSIONES_POR_PROPORCION.get(ratio_str, (ANCHO_FINAL_PX, ALTO_FINAL_PX))
 
     # Optimización de referencias para la llamada multimodal:
     # Se toman máximo las 2 referencias principales a 1024px para evitar desbordar tokens de entrada en el modelo de imagen
-    imagenes_ref_optimizadas = [_redimensionar_si_es_muy_grande(img, 1024) for img in imagenes_referencia[:2]]
+    imagenes_ref_optimizadas, n_ref_recortadas = preparar_referencias_para_modelo(imagenes_referencia[:2], analisis_ref)
+    if n_ref_recortadas:
+        _notificar_progreso(
+            callback_progreso, 5, total_etapas, "Generación con IA",
+            f"La referencia era la foto de una prenda: se aisló solo el estampado ({n_ref_recortadas} imagen/es) para que el modelo no copie la polera.",
+            "info",
+        )
 
     contenidos_multimodales = [
         "### [REFERENCIA(S) VISUAL(ES) DE ESTILO, TÉCNICA Y DIAGRAMACIÓN]:\n"
@@ -1321,11 +1751,13 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
     _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", "Aplicando recorte de fondo y reescalando a resolución final...", "running")
     
     t0_post = time.time()
+    diagnostico_fondo: dict = {}
     try:
         imagen_resultado = _postprocesar(
             imagen_base, color_fondo_solido, ancho_px, alto_px,
             layout if texto_local else None, config_texto,
             lambda m: _notificar_progreso(callback_progreso, 6, total_etapas, "Postprocesamiento", m, "info"),
+            diagnostico_fondo,
         )
     except Exception as e:
         raise ErrorProcesoPolera(
@@ -1348,6 +1780,8 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
     imagen_resultado.info["prompt_final"] = prompt_final
     imagen_resultado.info["imagen_cruda"] = imagen_base  # salida del modelo sin chroma ni texto local (para editar)
     imagen_resultado.info["ratio_str"] = ratio_str
+    imagen_resultado.info["diagnostico_fondo"] = diagnostico_fondo
+    imagen_resultado.info["referencia_recortada"] = n_ref_recortadas
     imagen_resultado.info["registro_tokens"] = registro_tokens
     imagen_resultado.info["tiempo_total_segundos"] = tiempo_total
     imagen_resultado.info["cache_generada"] = {

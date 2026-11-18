@@ -37,7 +37,7 @@
 </div>
 <div id="capas" title="Selecciona cualquier capa, aunque esté tapada por otra"></div>
 <div id="wrap"><div id="stage" tabindex="0"></div></div>
-<div id="ayuda">Arrastra para mover · esquinas escalan en proporción, bordes estiran · punto superior para rotar · lista de capas para elegir una tapada · flechas para ajuste fino (Mayús = más rápido) · Supr para quitar</div>
+<div id="ayuda">Arrastra para mover · las 4 esquinas escalan en proporción · punto superior para rotar · lista de capas para elegir una tapada · flechas para ajuste fino (Mayús = más rápido) · Supr para quitar</div>
 
 <script>
 // ---- Protocolo mínimo de componente Streamlit (sin build, sin npm) ----
@@ -76,11 +76,15 @@ function etiquetaCapa(n) {
 }
 
 function seleccionar(n) {
-  if (!n) { tr.nodes([]); }
-  else {
+  if (!n) {
+    tr.nodes([]);
+  } else {
     const esImg = n.getAttr("ctipo") === "imagen";
-    tr.keepRatio(esImg);   // esquinas: proporcional (en imágenes); bordes: estiran ese eje
-    tr.enabledAnchors(["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]);
+    tr.keepRatio(esImg);   // Para imagenes siempre escalar proporcionalmente desde las 4 esquinas
+    tr.enabledAnchors(esImg
+      ? ["top-left", "top-right", "bottom-left", "bottom-right"]
+      : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
+    );
     tr.nodes([n]);
     tr.moveToTop();
   }
@@ -122,23 +126,17 @@ function emitir() {
   setValor({ firma: firmaActual, capas });
 }
 
-// El área clicable de una imagen es su silueta (no el rectángulo): así un recorte con mucho
-// espacio transparente no tapa a los que tiene debajo.
-function hitPorAlfa(n) {
-  if (n.getAttr("ctipo") !== "imagen") return;
-  try { n.clearCache(); n.cache(); n.drawHitFromCache(20); } catch (e) { /* si falla, queda el rectángulo */ }
-}
-
 function hornear(n) {
   const sx = Math.abs(n.scaleX()), sy = Math.abs(n.scaleY());
   if (sx === 1 && sy === 1) return;
   if (n.getAttr("ctipo") === "imagen") {
-    n.width(n.width() * sx); n.height(n.height() * sy);
+    n.width(n.width() * sx);
+    n.height(n.height() * sy);
     n.scale({ x: 1, y: 1 });
     n.offset({ x: n.width() / 2, y: n.height() / 2 });
-    hitPorAlfa(n);
   } else {
-    n.setAttr("bw", n.getAttr("bw") * sx); n.setAttr("bh", n.getAttr("bh") * sy);
+    n.setAttr("bw", n.getAttr("bw") * sx);
+    n.setAttr("bh", n.getAttr("bh") * sy);
     n.scale({ x: 1, y: 1 });
     n.offset({ x: n.getAttr("bw") / 2, y: n.getAttr("bh") / 2 });
     ajustarTexto(n);
@@ -146,8 +144,18 @@ function hornear(n) {
 }
 
 function enlazar(n) {
-  n.on("click tap dragstart", () => seleccionar(n));
-  n.on("transformend", () => { hornear(n); tr.forceUpdate(); emitir(); });
+  n.on("click tap", () => {
+    if (seleccionado() !== n) seleccionar(n);
+  });
+  n.on("dragstart", () => {
+    if (seleccionado() !== n) seleccionar(n);
+  });
+  n.on("transformend", () => {
+    hornear(n);
+    tr.forceUpdate();
+    capaMain.batchDraw();
+    emitir();
+  });
   n.on("dragend", emitir);
 }
 
@@ -155,19 +163,47 @@ function crearCapa(c, imgs) {
   const cx = c.cx * W, cy = c.cy * H, w = Math.max(8, c.w * W), h = Math.max(8, c.h * H);
   let n;
   if (c.tipo === "imagen") {
-    n = new Konva.Image({ image: imgs[(c.idx || 0) % imgs.length], x: cx, y: cy, width: w, height: h,
-      offsetX: w / 2, offsetY: h / 2, rotation: c.rot || 0, draggable: true, name: "capa" });
+    n = new Konva.Image({
+      image: imgs[(c.idx || 0) % imgs.length],
+      x: cx,
+      y: cy,
+      width: w,
+      height: h,
+      offsetX: w / 2,
+      offsetY: h / 2,
+      rotation: c.rot || 0,
+      draggable: true,
+      name: "capa"
+    });
   } else {
-    n = new Konva.Group({ x: cx, y: cy, offsetX: w / 2, offsetY: h / 2, rotation: c.rot || 0, draggable: true, name: "capa" });
-    n.setAttr("bw", w); n.setAttr("bh", h);
+    n = new Konva.Group({
+      x: cx,
+      y: cy,
+      offsetX: w / 2,
+      offsetY: h / 2,
+      rotation: c.rot || 0,
+      draggable: true,
+      name: "capa"
+    });
+    n.setAttr("bw", w);
+    n.setAttr("bh", h);
     n.add(new Konva.Rect({ stroke: "#2b7fff", dash: [6, 4], strokeWidth: 1.5, fill: "rgba(43,127,255,0.10)", name: "caja" }));
-    n.add(new Konva.Text({ text: c.texto || "", align: "center", verticalAlign: "middle", fontStyle: "bold",
-      fill: c.color || "#ffffff", stroke: "rgba(0,0,0,.55)", strokeWidth: 1, fillAfterStrokeEnabled: true, name: "rotulo", listening: false }));
+    n.add(new Konva.Text({
+      text: c.texto || "",
+      align: "center",
+      verticalAlign: "middle",
+      fontStyle: "bold",
+      fill: c.color || "#ffffff",
+      stroke: "rgba(0,0,0,.55)",
+      strokeWidth: 1,
+      fillAfterStrokeEnabled: true,
+      name: "rotulo",
+      listening: false
+    }));
     ajustarTexto(n);
   }
   n.setAttrs({ cid: c.id, ctipo: c.tipo, cidx: c.idx, ctexto: c.texto, crol: c.rol });
   enlazar(n);
-  hitPorAlfa(n);
   return n;
 }
 
@@ -195,11 +231,29 @@ async function construir(a) {
     capaFondo.add(nodoRef);
   }
   (a.capas || []).forEach((c) => capaMain.add(crearCapa(c, imgs)));
-  tr = new Konva.Transformer({ rotateEnabled: true, anchorSize: 10, borderStroke: "#2b7fff", anchorStroke: "#2b7fff",
-    anchorFill: "#ffffff", rotationSnaps: [0, 90, 180, 270], rotationSnapTolerance: 5,
-    boundBoxFunc: (o, n) => (n.width < 12 || n.height < 12 ? o : n) });
+  tr = new Konva.Transformer({
+    rotateEnabled: true,
+    anchorSize: 14,
+    anchorCornerRadius: 3,
+    anchorStroke: "#2b7fff",
+    anchorStrokeWidth: 1.5,
+    anchorFill: "#ffffff",
+    borderStroke: "#2b7fff",
+    borderStrokeWidth: 1.5,
+    borderDash: [4, 4],
+    rotateAnchorOffset: 30,
+    rotationSnaps: [0, 90, 180, 270],
+    rotationSnapTolerance: 5,
+    flipEnabled: false,
+    boundBoxFunc: (oldBox, newBox) => {
+      if (Math.abs(newBox.width) < 15 || Math.abs(newBox.height) < 15) return oldBox;
+      return newBox;
+    }
+  });
   capaMain.add(tr);
-  stage.on("click tap", (e) => { if (e.target === stage || e.target.getLayer() === capaFondo) seleccionar(null); });
+  stage.on("click tap", (e) => {
+    if (e.target === stage || e.target.getLayer() === capaFondo) seleccionar(null);
+  });
   stage._imgs = imgs;
   seleccionar(null);
   setAlto();
@@ -217,7 +271,9 @@ $("bProp").onclick = () => {
   const im = n.image();
   n.height(n.width() * im.naturalHeight / im.naturalWidth);
   n.offset({ x: n.width() / 2, y: n.height() / 2 });
-  hitPorAlfa(n); tr.forceUpdate(); capaMain.batchDraw(); emitir();
+  tr.forceUpdate();
+  capaMain.batchDraw();
+  emitir();
 };
 $("bDup").onclick = () => {
   const n = seleccionado();

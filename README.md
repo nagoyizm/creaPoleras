@@ -47,8 +47,8 @@ python generador.py
 
 ## Mesa de composición (ubicar imágenes y textos)
 
-En la interfaz, el paso **4.2** (opcional) abre un lienzo con la referencia de fondo (tenue) y tus
-imágenes ya recortadas. Arrástralas, escálalas y rótalas donde quieras; el título y las frases son
+En la interfaz, el paso **4.2** (opcional) abre un lienzo interactivo con Konva.js con la referencia de fondo (tenue) y tus
+imágenes ya recortadas. Arrástralas con drag & drop, escálalas proporcionalmente desde los anclajes de las 4 esquinas y rótalas donde quieras; el título y las frases son
 cajas movibles. Al generar, la IA recibe un boceto con esas posiciones y coordenadas explícitas.
 
 - **Proponer ubicaciones desde la referencia**: una llamada barata de visión detecta dónde están
@@ -63,3 +63,34 @@ cajas movibles. Al generar, la IA recibe un boceto con esas posiciones y coorden
 - Todo lo generado se guarda en `salidas/` (ignorada por git).
 
 Si no activas la mesa, la app funciona exactamente como antes.
+
+## Nuevas Funcionalidades y Mejoras Recientes
+
+### ✂️ Vista previa y depuración de recorte del sujeto (Local • 0 tokens)
+En el **Paso 2**, cada foto del sujeto subida se procesa localmente con `rembg` (o se respeta su canal alfa si ya venía recortada) y se visualiza en una comparativa interactiva:
+- **Vista individual por imagen**: Comparación lado a lado de la foto original vs la silueta recortada (con pestañas para múltiples imágenes).
+- **Fondos de inspección**: Alterna entre *Ajedrezado transparente*, *Fondo oscuro (#181818)* para detectar halos claros, *Fondo blanco (#FFFFFF)* para sombras, o *Transparente puro (PNG)*.
+- **Depuración ultra rápida (~5ms)**:
+  - **Tolerancia / Umbral alfa (1-80)**: Limpia niebla semitransparente o píxeles dispersos.
+  - **Reducción de halos / Erosión (0-3px)**: Aplica `ImageFilter.MinFilter(3)` para encoger el perímetro y eliminar el color residual del fondo original.
+- **Descarga individual**: Botón para descargar el PNG transparente recortado de cada sujeto.
+- **Reutilización instantánea**: Los recortes depurados se transfieren directamente a la mesa y a la generación final sin volver a ejecutar `rembg`.
+
+### 🚫 Diseños sin título principal o 100% libres de texto
+En el **Paso 4 (Textos)**, puedes activar la casilla `No incluir título principal`.
+- La IA recibe una instrucción estricta que prohíbe inventar títulos, tipografías o palabras grandes, asignando el 100% del espacio a las ilustraciones y ornamentos gráficos.
+- Si tampoco ingresas frases secundarias, el diseño se genera completamente libre de letras.
+- La mesa de composición y el motor gráfico ajustan automáticamente la cuadrícula hacia la parte superior.
+
+### 🧠 Memoria de aprendizaje persistente (`aprendizajes.json`)
+Bajo el diseño generado, encuentras la sección de **Retroalimentación y Aprendizaje**:
+- **¿Qué cosas salieron mal en este diseño?**: Permite describir errores (textos inventados, fósiles de la referencia colados, fisonomía incorrecta, etc.).
+- **Guardar como aprendizaje permanente**: Guarda la regla en `aprendizajes.json` (montado en Docker en Contabo y local en PC) y la inyecta automáticamente en el prompt maestro de todas las futuras generaciones.
+- **Corregir y Regenerar ahora**: Aplica la corrección de forma inmediata con prioridad máxima.
+- **Panel en la barra lateral**: Permite activar, desactivar o eliminar reglas aprendidas en cualquier momento.
+
+### 🧹 Botón de Reiniciar y Limpieza de Disco
+- Botón en la cabecera y en la barra lateral que restablece el formulario, limpia las fotos subidas, vacía la caché de memoria y opcionalmente borra los archivos temporales generados en `salidas/`.
+
+## Compatibilidad Multiplataforma (PC Windows y Contabo VPS)
+Todos los cambios están desarrollados para ejecutarse idénticamente tanto en tu computador local como en servidores Linux bajo Docker (Contabo). Consulta [DESPLIEGUE_CONTABO.md](DESPLIEGUE_CONTABO.md) para detalles de despliegue y actualización.

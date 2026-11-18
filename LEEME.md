@@ -142,6 +142,40 @@ La interfaz visual acepta JPG, PNG, WEBP y AVIF. WEBP lo lee Pillow de forma
 nativa; AVIF necesita el paquete extra `pillow-avif-plugin` (ya está en
 `requirements.txt`, se instala solo).
 
+## Vista previa y depuración de recorte del sujeto (Paso 2)
+
+Cuando subes fotos de tu sujeto o personaje en el paso 2:
+- El programa procesa el recorte de forma local en tu máquina (a 0 costo de tokens).
+- Puedes marcar **"✅ Mi sujeto ya viene recortado"** si tu foto ya es un PNG transparente de Photoshop/Canva; esto preserva intactos sus bordes originales y salta rembg.
+- Si tiene fondo, se muestra un panel interactivo con la vista previa de cada imagen recortada.
+- **Selector de fondo de inspección**: puedes ver el recorte sobre ajedrezado transparente, fondo oscuro (#181818) para detectar halos claros, fondo blanco (#FFFFFF) para sombras, o transparente puro.
+- **Sliders de ajuste rápido (~5ms)**:
+  - *Tolerancia / Umbral alfa*: elimina niebla semitransparente o ruido disperso.
+  - *Reducción de halos (erosión de bordes)*: encoge 1 a 3 píxeles el contorno con un filtro de erosión perimetral (`MinFilter`) para quitar rebordes del color del fondo original.
+- Botón de descarga para guardar individualmente el recorte en PNG transparente.
+- Las imágenes recortadas y depuradas se reutilizan automáticamente en la mesa de composición y en la generación final sin volver a gastar tiempo en rembg.
+
+## Diseños sin título principal (Paso 4)
+
+Si no quieres que tu polera lleve un título grande o nombre dominante:
+- Marca la casilla **"🚫 No incluir título principal (diseño solo con ilustraciones o frases)"** en el Paso 4.
+- El sistema deshabilita la obligación de escribir un título y le da una instrucción expresa a Gemini para que NO invente títulos, palabras ni logotipos en la pieza, dedicando el 100% del lienzo al arte y las ilustraciones.
+- Si tampoco ingresas frases secundarias, el diseño se genera 100% libre de tipografía.
+
+## Memoria de Aprendizaje y Retroalimentación Persistente
+
+Debajo de cada diseño generado tienes un panel para enseñar al programa qué mejorar:
+- Describe qué salió mal (ej: "inventó palabras que no pedí", "el fondo tiene manchas", "el personaje no tiene lentes").
+- Elige la categoría y presiona:
+  - **🧠 Guardar como aprendizaje permanente**: Registra la regla en `aprendizajes.json`. Esta regla se inyecta en el prompt maestro de todas las futuras generaciones (tanto en tu PC como en Contabo vía Docker volume) para no repetir errores pasados.
+  - **🔄 Corregir y Regenerar ahora con este feedback**: Vuelve a generar el diseño aplicando tu corrección como directriz urgente de máxima prioridad.
+- En la barra lateral izquierda puedes consultar, activar, desactivar o eliminar cualquiera de las reglas aprendidas.
+
+## Botón de Reiniciar y Limpieza de Disco
+
+- En la barra lateral y en la cabecera tienes el botón **"🔄 Reiniciar Proceso y Limpiar Imágenes"** y **"🧹 Limpiar todo"**.
+- Restablece el formulario a su estado original, borra las fotos subidas, vacía la caché de memoria y opcionalmente borra las imágenes generadas de la carpeta `salidas/` en el disco.
+
 ## Notas
 
 - La primera llamada (analizar referencia) es prácticamente gratis.
