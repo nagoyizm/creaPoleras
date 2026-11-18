@@ -114,6 +114,14 @@ programa poleras/
 * Las lecciones son GLOBALES: aplican a todo sujeto. Redactarlas en general ("no dibujar texto extra") y no sobre un caso ("el dinosaurio salió feo").
 * PC y servidor tienen memorias separadas.
 
+### I. Modo Reilustrar de la mesa: la guía NO lleva las fotos
+* **Problema detectado**: la guía enviada al modelo tenía los recortes reales pegados en su posición; el modelo los copiaba y devolvía la referencia con una foto encima (0 % reilustrado).
+* **Ahora** (`composicion.componer_guia(..., modo=...)`): en `reilustrar` la guía solo trae siluetas grises NUMERADAS (`_silueta_numerada`, sin ningún píxel de la foto) que marcan posición, tamaño y rotación; la identidad del sujeto viene de las fotos que se envían aparte. En `respetar` se siguen pegando los recortes reales.
+* **Prompt**: bloque `ROL` de director de arte (siempre) + directiva de reilustración (solo mesa+reilustrar): redibujar desde cero con trazo, trama, sombreado y paleta de la referencia, quitar ruido fotográfico, integrar elementos, comprobación final "si parece foto o pegatina, está mal", y no copiar personajes ni composición de la referencia.
+* **Composición guiada, no molde** (Reilustrar): la guía expresa la intención del usuario ("más o menos dónde va cada cosa"). El prompt conserva cuántos elementos hay, su zona general y la jerarquía de tamaños, pero autoriza al modelo a ajustar posiciones/escalas/ángulos (~15 %), solapar y añadir ornamentación de enlace, y le pide reinterpretar el conjunto como un todo. La regla rígida "no cambies su ubicación ni su escala" queda solo en modo Respetar. Antes la tenían los dos modos y contradecía la integración.
+* **Pose libre por defecto**: casilla "Conservar la pose y la silueta de mi foto" (clave `mesa_conservar_pose`, desmarcada). Desmarcada, la guía usa ÓVALOS neutros (solo zona y tamaño) y el prompt dice que la pose/ángulo/encuadre no tienen que ser los de la foto, conservando la identidad (rasgos, colores, marcas). Marcada, la guía usa la silueta del recorte y el prompt pide mantener la pose. Parámetro `conservar_pose` de `generar_diseno_desde_imagenes` y `componer_guia`.
+* **Sin verificar con el modelo real**: se probó con un Gemini falso (la guía no contiene la foto; el prompt trae las reglas). Si aun así copia, el siguiente paso es un flujo en dos pasadas: redibujar cada sujeto por separado (1 llamada por elemento) y componer/integrar al final. Cuesta N+1 llamadas.
+
 ---
 
 ## 4. Compatibilidad Multiplataforma (PC Windows y Contabo VPS)

@@ -398,27 +398,63 @@ def _color_a_rgb(hex_color: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def _silueta_numerada(src: Image.Image, ancho: int, alto: int, numero: int, fondo_rgb: tuple[int, int, int],
+                      conservar_pose: bool = True) -> Image.Image:
+    """Marcador de posición de un elemento, en gris plano con un número. No contiene NINGÚN píxel de la foto,
+    así el modelo no puede copiarla. Con conservar_pose usa la silueta del recorte (el modelo ve la pose);
+    sin ella, un óvalo neutro: solo marca zona y tamaño, y la pose queda a criterio del modelo."""
+    if conservar_pose:
+        alfa = src.convert("RGBA").split()[-1].resize((ancho, alto), Image.LANCZOS)
+    else:
+        alfa = Image.new("L", (ancho, alto), 0)
+        ImageDraw.Draw(alfa).ellipse([0, 0, ancho - 1, alto - 1], fill=255)
+    luz = 0.299 * fondo_rgb[0] + 0.587 * fondo_rgb[1] + 0.114 * fondo_rgb[2]
+    relleno, tinta = ((60, 60, 60), (235, 235, 235)) if luz > 110 else ((205, 205, 205), (30, 30, 30))
+    tile = Image.new("RGBA", (ancho, alto), relleno + (255,))
+    tile.putalpha(alfa)
+    d = ImageDraw.Draw(tile)
+    tam = max(14, int(min(ancho, alto) * 0.35))
+    try:
+        fuente = ImageFont.load_default(size=tam)
+        d.text((ancho / 2, alto / 2), str(numero), fill=tinta + (255,), font=fuente, anchor="mm")
+    except Exception:
+        d.text((ancho / 2 - 4, alto / 2 - 6), str(numero), fill=tinta + (255,))
+    return tile
+
+
 def componer_guia(
     capas: list[dict],
     recortes: list[Image.Image],
     ratio_wh: tuple[int, int],
     color_fondo: str,
     incluir_texto: bool,
+    modo: str = "respetar",
+    conservar_pose: bool = True,
 ) -> Image.Image:
     """
-    Boceto de la composición: fondo plano + recortes del sujeto en su posición/escala reales.
+    Boceto de la composición: fondo plano + cada elemento en su posición/escala reales.
+    - modo "respetar": se pegan los recortes reales del sujeto (el modelo debe conservarlos).
+    - modo "reilustrar": se dibujan marcadores grises NUMERADOS, sin fotos (el modelo debe redibujarlos): la silueta
+      del recorte si conservar_pose, o un óvalo neutro si no.
     Si incluir_texto, el título y las frases se dibujan (con caja tenue) en su sitio.
     Respeta el orden de `capas` como orden de apilado (la primera queda al fondo).
     """
     W, H = dimensiones_lienzo(*ratio_wh)
-    guia = Image.new("RGBA", (W, H), _color_a_rgb(color_fondo) + (255,))
+    fondo_rgb = _color_a_rgb(color_fondo)
+    guia = Image.new("RGBA", (W, H), fondo_rgb + (255,))
+    n_imagen = 0
     for capa in capas:
         rot = capa.get("rot", 0)
         if capa["tipo"] == "imagen":
             if not recortes:
                 continue
+            n_imagen += 1
             src = recortes[capa.get("idx", 0) % len(recortes)].convert("RGBA")
-            tile = src.resize((max(2, round(capa["w"] * W)), max(2, round(capa["h"] * H))), Image.LANCZOS)
+            ancho, alto = max(2, round(capa["w"] * W)), max(2, round(capa["h"] * H))
+            if modo == "reilustrar":
+                tile = _silueta_numerada(src, ancho, alto, n_imagen, fondo_rgb, conservar_pose)
+            else:
+                tile = src.resize((ancho, alto), Image.LANCZOS)
             _pegar_capa_rotada(guia, tile, capa["cx"] * W, capa["cy"] * H, rot)
         elif incluir_texto and str(capa.get("texto", "")).strip():
             ancho, alto = max(4, round(capa["w"] * W)), max(4, round(capa["h"] * H))

@@ -773,6 +773,15 @@ def _seccion_mesa(archivos_ref, archivos_pers, recortar, ya_recortado, titulo, f
              "Respetar: conserva el aspecto de tus imágenes y solo les aplica tinta, trama y bordes.",
     )
     modo_guia = "respetar" if modo.startswith("Respetar") else "reilustrar"
+    if modo_guia == "reilustrar":
+        st.checkbox(
+            "Conservar la pose y la silueta de mi foto",
+            value=False,
+            key="mesa_conservar_pose",
+            help="Desmarcado (recomendado): la IA elige la pose, el ángulo y el encuadre más expresivos y mejor integrados al diseño; "
+                 "tu posición en la mesa es solo una guía aproximada de zona y tamaño. "
+                 "Marcado: mantiene la pose y la silueta de cada foto, solo redibujadas en el estilo.",
+        )
 
     texto_local = st.checkbox(
         "Dibujar el título y las frases yo mismo con una fuente real",
@@ -1053,6 +1062,7 @@ if debe_generar:
                 modo_ahorro_tokens=modo_ahorro_sujeto,
                 layout=layout_final if usar_mesa else None,
                 modo_guia=modo_guia,
+                conservar_pose=bool(st.session_state.get("mesa_conservar_pose", False)) and modo_guia == "reilustrar",
                 texto_local=bool(usar_mesa and texto_local),
                 config_texto=config_texto if (usar_mesa and texto_local) else None,
                 recortes_precalculados=recortes_a_usar,

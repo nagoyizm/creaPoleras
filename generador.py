@@ -1184,6 +1184,7 @@ def generar_diseno_desde_imagenes(
     modo_ahorro_tokens: bool = False,
     layout: list[dict] | None = None,
     modo_guia: str = "reilustrar",
+    conservar_pose: bool = False,
     texto_local: bool = False,
     config_texto: dict | None = None,
     recortes_precalculados: list[Image.Image] | None = None,
@@ -1440,6 +1441,21 @@ def generar_diseno_desde_imagenes(
     # Mesa de composición: capas del usuario -> imagen guía + coordenadas explícitas
     capas_imagen = [c for c in (layout or []) if c.get("tipo") == "imagen"]
     usar_layout = bool(layout) and bool(capas_imagen)
+    # Marcadores de la guia y criterio de pose (solo modo Reilustrar con mesa)
+    conservar_pose = bool(conservar_pose)
+    if conservar_pose:
+        marcador_guia = "SILUETAS GRISES NUMERADAS (la forma de cada una es la del sujeto de la foto del usuario)"
+        clausula_pose_elemento = "manteniendo la pose y el ángulo de esa foto"
+        clausula_pose_regla = "mantener la pose y el ángulo de cada sujeto como en su foto, "
+        clausula_pose_directiva = "Conserva la pose, el ángulo y la silueta general de cada foto (redibujados). "
+    else:
+        marcador_guia = "ÓVALOS GRISES NUMERADOS (solo marcan una zona y un tamaño: su forma NO es la silueta del sujeto)"
+        clausula_pose_elemento = "con la pose y el ángulo más expresivos que elijas (no tienen que ser los de la foto)"
+        clausula_pose_regla = "cambiar el encuadre y la pose de cada sujeto (no tiene que ser la de la foto), "
+        clausula_pose_directiva = (
+            "LA POSE NO ES OBLIGATORIA: elige la pose, el ángulo y el encuadre más expresivos y mejor integrados con el resto de la pieza "
+            "(no tienen que ser los de la foto ni su silueta), conservando siempre la identidad del sujeto (rasgos, colores, marcas, proporciones). "
+        )
     imagen_guia = None
     bloque_composicion = ""
     regla_referencia = "La referencia es SOLO una plantilla de diagramación; el contenido visual entero es 100% " + sujeto_nombre + "."
@@ -1457,22 +1473,38 @@ def generar_diseno_desde_imagenes(
         for k, capa in enumerate(capas_imagen):
             idx = capa.get("idx", 0) % n_fotos
             zona = composicion._zona(capa["cx"], capa["cy"])
-            linea = f"  * Elemento {k+1} (zona {zona}): {sujeto_nombre}, tal como aparece en la imagen #{idx+1} de la GUÍA DE COMPOSICIÓN."
+            if modo_guia == "reilustrar":
+                linea = (f"  * Elemento {k+1} (zona {zona}): {sujeto_nombre} en el marcador numerado {k+1} de la GUÍA, "
+                         f"REDIBUJADO desde cero en el estilo de la referencia, tomando la identidad de la FOTO #{idx+1} del sujeto, "
+                         f"{clausula_pose_elemento}.")
+            else:
+                linea = f"  * Elemento {k+1} (zona {zona}): {sujeto_nombre}, tal como aparece en la imagen #{idx+1} de la GUÍA DE COMPOSICIÓN."
             if usos_por_foto[idx] > 1 and variaciones:
                 linea += f" Variante propia: {variaciones[k % len(variaciones)]}."
             lineas_elementos.append(linea)
 
         imagen_guia = composicion.componer_guia(
             layout, imagenes_personaje_final, composicion_ratio_wh(ratio_str),
-            color_fondo_solido or COLOR_CHROMA_DEFECTO, incluir_texto=not texto_local,
+            color_fondo_solido or COLOR_CHROMA_DEFECTO, incluir_texto=not texto_local, modo=modo_guia,
+            conservar_pose=conservar_pose,
         )
-        bloque_composicion = (
-            "\n* GUÍA DE COMPOSICIÓN OBLIGATORIA (la imagen de guía adjunta es un boceto de ubicación y escala; "
-            "respétala con precisión). Coordenadas en % del lienzo, origen arriba-izquierda, x→derecha, y→abajo:\n"
-            + composicion.describir_layout(layout, texto_local)
-            + "\n* El boceto es SOLO una guía de ubicación: NO copies su fondo plano, sus cajas ni sus bordes tenues; "
-              "redibuja todo integrado en el estilo de la referencia, en la misma posición y proporción."
-        )
+        if modo_guia == "reilustrar":
+            bloque_composicion = (
+                "\n* GUÍA DE COMPOSICIÓN OBLIGATORIA: la imagen de guía muestra " + marcador_guia + " que indican, de forma APROXIMADA, "
+                "dónde quiere el usuario cada elemento, su tamaño relativo y su inclinación; NO son fotos ni dibujos y NO forman parte del arte: "
+                "no copies el gris, los números ni los contornos. Es una indicación de intención: reinterpreta la composición completa y dibuja "
+                "al sujeto, redibujado en el estilo de la referencia, en esa zona. "
+                "Coordenadas aproximadas en % del lienzo, origen arriba-izquierda, x→derecha, y→abajo:\n"
+                + composicion.describir_layout(layout, texto_local)
+            )
+        else:
+            bloque_composicion = (
+                "\n* GUÍA DE COMPOSICIÓN OBLIGATORIA (la imagen de guía adjunta es un boceto de ubicación y escala; "
+                "respétala con precisión). Coordenadas en % del lienzo, origen arriba-izquierda, x→derecha, y→abajo:\n"
+                + composicion.describir_layout(layout, texto_local)
+                + "\n* El boceto es SOLO una guía de ubicación: NO copies su fondo plano, sus cajas ni sus bordes tenues; "
+                  "redibuja todo integrado en el estilo de la referencia, en la misma posición y proporción."
+            )
         regla_referencia = (
             "La referencia es SOLO guía de estilo (técnica, tipografía, color); la ubicación y escala de cada elemento "
             f"las define la GUÍA DE COMPOSICIÓN; el contenido visual entero es 100% {sujeto_nombre}."
@@ -1552,6 +1584,23 @@ def generar_diseno_desde_imagenes(
             "proporciones de las ilustraciones de la GUÍA DE COMPOSICIÓN. Aplica sobre ellas solo el tratamiento de "
             "tinta, trama, color, bordes y textura de la referencia para que se integren al arte sin cambiar quiénes son."
         )
+    elif usar_layout and modo_guia == "reilustrar":
+        directrices_usuario.append(
+            "- DIRECTIVA DE REILUSTRACIÓN (TRABAJA COMO DISEÑADOR): Las fotos del sujeto son SOLO material de identidad "
+            "(especie o rasgos, colores, proporciones, marcas distintivas). El resultado NO debe contener ninguna fotografía, "
+            "recorte fotográfico ni textura fotorrealista: cada elemento se REDIBUJA desde cero con el mismo trazo, entintado, "
+            "trama, sombreado y paleta de la referencia, como si lo hubiera dibujado el mismo artista. Elimina el ruido fotográfico "
+            "(reflejos, fondo, iluminación de estudio) y traduce luces y sombras a la técnica de sombreado de la referencia; "
+            "simplifica, exagera o estiliza lo que haga falta para que se lea bien en una polera, sin perder el parecido con el sujeto. "
+            + clausula_pose_directiva +
+            "REINTERPRETA EL CONJUNTO COMO UN TODO: no coloques elementos aislados en huecos; diseña la composición completa como lo haría "
+            "el ilustrador de la referencia si hubiera tenido a este sujeto: ritmo, jerarquía, direcciones de movimiento o de mirada, "
+            "espacios negativos, y ornamentación que enlace los elementos entre sí. "
+            "INTEGRA: mismo grosor de línea en todos los elementos, paleta unificada, ornamentos, marcos y sombras con el mismo "
+            "vocabulario gráfico, y elementos que se relacionen entre sí (cercanía, solapes sutiles, ornamento de enlace). "
+            "COMPROBACIÓN FINAL: si algún elemento parece una foto, una pegatina o un recorte sobre el fondo, está MAL: redibújalo. "
+            "No copies los personajes, objetos ni la composición de la referencia: de ella solo toma la técnica."
+        )
     elif "total" in nivel_estilizacion.lower():
         directrices_usuario.append(
             "- DIRECTIVA DE ESTILIZACIÓN (TRANSFORMACIÓN ARTÍSTICA TOTAL): Dibuja al sujeto completamente desde cero "
@@ -1619,11 +1668,22 @@ def generar_diseno_desde_imagenes(
         atmosfera_texto += f". Iluminación: {iluminacion}"
 
     if usar_layout:
-        regla_variedad = (
-            "* REGLA DE FIDELIDAD A LA GUÍA: cada elemento corresponde a la ilustración indicada en la guía; "
-            "no agregues ilustraciones extra ni quites ninguna, y no cambies su ubicación ni su escala relativa."
-            + ("" if texto_local else f" Si el diseño incluye rótulos pequeños bajo cada ilustración, deben nombrar detalles relevantes de {sujeto_nombre}.")
-        )
+        if modo_guia == "reilustrar":
+            regla_variedad = (
+                "* REGLA DE COMPOSICIÓN GUIADA: la guía expresa la INTENCIÓN del usuario (qué va en cada zona y qué es más importante), "
+                "no es un molde. Conserva: cuántos elementos hay, la zona general de cada uno y la jerarquía de tamaños (el más grande sigue "
+                "siendo el protagonista). Como diseñador PUEDES y DEBES ajustar posiciones, escalas y ángulos (hasta ~15 % del lienzo), "
+                + clausula_pose_regla + "solapar elementos y añadir ornamentación de enlace (marcos, destellos, líneas, "
+                "sombras, trama) con el vocabulario gráfico de la referencia, para que todo funcione como UNA sola composición. "
+                "No agregues sujetos extra ni personajes ajenos."
+                + ("" if texto_local else f" Si el diseño incluye rótulos pequeños bajo cada ilustración, deben nombrar detalles relevantes de {sujeto_nombre}.")
+            )
+        else:
+            regla_variedad = (
+                "* REGLA DE FIDELIDAD A LA GUÍA: cada elemento corresponde a la ilustración indicada en la guía; "
+                "no agregues ilustraciones extra ni quites ninguna, y no cambies su ubicación ni su escala relativa."
+                + ("" if texto_local else f" Si el diseño incluye rótulos pequeños bajo cada ilustración, deben nombrar detalles relevantes de {sujeto_nombre}.")
+            )
     else:
         regla_variedad = (
             "* REGLA DE VARIEDAD: Cada elemento debe ser una variante, perspectiva o detalle único como se especifica arriba. "
@@ -1661,6 +1721,12 @@ def generar_diseno_desde_imagenes(
 - Textos secundarios / subtítulos: {frases_texto} (Estilo tipográfico: {estilo_subtitulos})
 * REGLA DE TEXTO: Dibuja ÚNICAMENTE los textos indicados por el usuario ("{titulo}" y frases secundarias especificadas). PROHIBIDO copiar o inventar frases ajenas (como textos de memes, fósiles o frases de la referencia). Ortografía exacta y tipografía nítida."""
 
+    bloque_rol = (
+        "\nROL: Eres un director de arte e ilustrador senior de merchandising. No pegas ni calcas: DISEÑAS. "
+        "Interpretas la técnica de la referencia (línea, trama, sombreado, paleta limitada, ornamentos) y reinterpretas todo el diseño "
+        "con ella: dibujas al sujeto, decides qué simplificar, qué resaltar y cómo componer y enlazar los elementos para que el conjunto "
+        "sea una sola pieza coherente, bella e imprimible en una polera (silueta clara, buen contraste, pocos colores, sin fondo ni prenda).\n"
+    )
     bloque_prenda = ""
     if analisis_ref.get("referencia_es_prenda"):
         bloque_prenda = (
@@ -1670,7 +1736,7 @@ def generar_diseno_desde_imagenes(
 
     prompt_final = f"""
 [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO PARA POLERA / T-SHIRT ARTWORK]
-{bloque_aprendizajes}
+{bloque_rol}{bloque_aprendizajes}
 {bloque_directrices_usuario}
 1. SUJETO ÚNICO Y EXCLUSIVO DE TODA LA ILUSTRACIÓN:
 - Sujeto objetivo a ilustrar: {sujeto_nombre}
@@ -1727,8 +1793,10 @@ Genera exactamente {cant_elementos} elemento(s)/ilustración(es) en la composici
     if imagen_guia is not None:
         contenidos_multimodales += [
             "\n### [GUÍA DE COMPOSICIÓN: BOCETO DE UBICACIÓN Y ESCALA]:\n"
-            "Esta imagen indica DÓNDE va cada ilustración (y cada texto, si aparece) y a qué tamaño. "
-            "Respeta esas posiciones y proporciones; el estilo viene de las referencias, no de este boceto:",
+            + ("Los marcadores grises numerados indican, de forma aproximada, dónde quiere el usuario cada elemento y su tamaño relativo (no son arte ni fotos: no las copies). "
+               if modo_guia == "reilustrar" else
+               "Esta imagen indica DÓNDE va cada ilustración (y cada texto, si aparece) y a qué tamaño. ")
+            + "Respeta esas posiciones y proporciones; el estilo viene de las referencias, no de este boceto:",
             imagen_guia,
         ]
     contenidos_multimodales.append(f"\n### [ESPECIFICACIÓN MAESTRA DE DISEÑO GRÁFICO]:\n{prompt_final}")
